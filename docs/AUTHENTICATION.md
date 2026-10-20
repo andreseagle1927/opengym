@@ -43,6 +43,7 @@ Set these API environment values:
 ```dotenv
 APPLE_WEB_CLIENT_ID=com.adrenocromo.gym.web
 APPLE_IOS_CLIENT_ID=com.adrenocromo.gym
+APPLE_TEAM_ID=<10-character-team-id>
 APPLE_REDIRECT_URL=https://gym.adrenocromo.com/api/auth/apple/callback
 APPLE_CLIENT_IDS=com.adrenocromo.gym,com.adrenocromo.gym.web
 ```
@@ -69,7 +70,7 @@ Use the Admin page to issue one-time password reset codes. Each code expires aft
 
 - **Web**: HTTPS and `RP_ID=gym.adrenocromo.com` are already configured for this deployment.
 - **Android**: `https://gym.adrenocromo.com/.well-known/assetlinks.json` now associates the site with `com.adrenocromo.gym` signed by the Kotlin starter's current debug certificate. The Kotlin manifest also references the association file. Before distributing a release, add that release's signing certificate SHA-256 fingerprint; Play Store builds use the Play App Signing certificate. Google Password Manager credential sharing in production should be configured through Play Console and use a Play-published build.
-- **iOS**: enable Associated Domains and add `webcredentials:gym.adrenocromo.com`; serve an Apple App Site Association file listing the Apple Team ID and app bundle ID.
+- **iOS**: enable Associated Domains and add `webcredentials:gym.adrenocromo.com`; set `APPLE_TEAM_ID` and `APPLE_IOS_CLIENT_ID`. The live API serves the Apple App Site Association file from `/.well-known/apple-app-site-association` when those values are configured.
 
 ## References
 

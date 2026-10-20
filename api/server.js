@@ -36,6 +36,7 @@ const APPLE_CLIENT_IDS = (process.env.APPLE_CLIENT_IDS || '').split(',').map(s =
 const GOOGLE_WEB_CLIENT_ID = process.env.GOOGLE_WEB_CLIENT_ID || '';
 const GOOGLE_IOS_CLIENT_ID = process.env.GOOGLE_IOS_CLIENT_ID || '';
 const APPLE_IOS_CLIENT_ID = process.env.APPLE_IOS_CLIENT_ID || '';
+const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || '';
 const APPLE_WEB_CLIENT_ID = process.env.APPLE_WEB_CLIENT_ID || '';
 const APPLE_REDIRECT_URL = process.env.APPLE_REDIRECT_URL || '';
 const NATIVE_REDIRECT_URI = process.env.NATIVE_REDIRECT_URI || 'com.adrenocromo.gym://auth/callback';
@@ -385,6 +386,11 @@ setInterval(() => { for (const [k, v] of presence) if (Date.now() - v.updatedAt 
 /* ---------- routes ---------- */
 const routes = {
   'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
+
+  'GET /.well-known/apple-app-site-association': async (req, res) => {
+    if (!/^[A-Z0-9]{10}$/.test(APPLE_TEAM_ID) || !APPLE_IOS_CLIENT_ID) return json(res, 404, { error: 'Apple passkey association is not configured' });
+    json(res, 200, { webcredentials: { apps: [`${APPLE_TEAM_ID}.${APPLE_IOS_CLIENT_ID}`] } }, { 'Cache-Control': 'public, max-age=300' });
+  },
 
   // Public config the login screen needs before anyone is signed in.
   'GET /api/config': async (req, res) => json(res, 200, {
