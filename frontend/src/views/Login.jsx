@@ -1,6 +1,6 @@
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
-import { webauthnOK, passkeyLogin, passkeyRegister, BIO } from '../lib/api.js'
+import { webauthnOK, passkeyLogin, passkeyRegister, passwordLogin, passwordRegister, resetPassword, signInWithGoogle, signInWithApple, socialProviderEnabled, BIO } from '../lib/api.js'
 import { hasData } from '../store/useStore.js'
 import { t } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
@@ -14,6 +14,7 @@ function RegisterSheet({ close }) {
   const config = useStore(s => s.config)
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
+  const [forgot, setForgot] = useState(false)
   const inviteOnly = !!config?.invite_only
   const ref = useRef(null)
   useEffect(() => { setTimeout(() => ref.current?.focus(), 250) }, [])
@@ -49,7 +50,49 @@ function RegisterSheet({ close }) {
 export default function Login() {
   const { setUser, pullState, setGuest } = useStore()
   const config = useStore(s => s.config)
+  const googleEnabled = socialProviderEnabled('google', config)
+  const appleEnabled = socialProviderEnabled('apple', config)
   const canGuest = guestAllowed(config)
+  const [register, setRegister] = useState(false)
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [forgot, setForgot] = useState(false)
+  const [resetCode, setResetCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const finish = async (u, welcome = false) => {
+    setUser(u)
+    if (hasData(useStore.getState().S)) await useStore.getState().pushState()
+    else await pullState()
+    useUI.getState().toast(welcome ? t('Welcome, {0}', u.name) : t('Welcome back, {0}', u.name))
+  }
+  const passwordSubmit = async ev => {
+    ev.preventDefault()
+    setBusy(true)
+    try {
+      if (forgot) {
+        await resetPassword({ code: resetCode, newPassword: password })
+        setForgot(false); setPassword(''); setResetCode('')
+        useUI.getState().toast(t('Password updated. Sign in with the new password.'))
+        return
+      }
+      const u = register
+        ? await passwordRegister({ name, email, password, code })
+        : await passwordLogin({ email, password })
+      await finish(u, register)
+    } catch (e) { useUI.getState().toast(e.message || t('Sign-in failed')) }
+    finally { setBusy(false) }
+  }
+  const providerSubmit = async provider => {
+    setBusy(true)
+    try {
+      const options = { code: register ? code : '', name: register ? name : '' }
+      const u = provider === 'google' ? await signInWithGoogle(config, options) : await signInWithApple(config, options)
+      await finish(u, register)
+    } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Sign-in failed')) }
+    finally { setBusy(false) }
+  }
   const signIn = async () => {
     try { const u = await passkeyLogin(); setUser(u); await pullState(); useUI.getState().toast(t('Welcome back, {0}', u.name)) }
     catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Sign-in failed')) }
@@ -89,6 +132,30 @@ export default function Login() {
         // Without passkeys and without the guest entrance there is no way in from this browser,
         // so say that plainly instead of offering a local profile that cannot be created.
         : t("This browser doesn't support passkeys, and this instance requires an account. Try a browser or device with passkey support.")}</div>}
+      {(googleEnabled || appleEnabled) && <>
+        {googleEnabled && <Button disabled={busy} icon="sparkles" onClick={() => providerSubmit('google')}>{t('Continue with Google')}</Button>}
+        {appleEnabled && <Button disabled={busy} icon="person" onClick={() => providerSubmit('apple')}>{t('Continue with Apple')}</Button>}
+        <div className="dim small" style={{ margin: '10px 0' }}>{t('or use email and password')}</div>
+      </>}
+      <form onSubmit={passwordSubmit} style={{ display: 'grid', gap: 9, marginTop: 12 }}>
+        {forgot ? <>
+          <div className="dim small">{t('Ask your OpenGym administrator for a one-time password reset code. It expires after 15 minutes.')}</div>
+          <input className="input" placeholder={t('Reset code')} autoComplete="one-time-code" value={resetCode} onChange={e => setResetCode(e.target.value)} required />
+          <input className="input" type="password" placeholder={t('New password (12 characters minimum)')} autoComplete="new-password" minLength={12} maxLength={128} value={password} onChange={e => setPassword(e.target.value)} required />
+          <Button variant="primary" disabled={busy}>{t('Reset password')}</Button>
+        </> : <>
+          {register && <input className="input" placeholder={t('Your name')} autoComplete="name" maxLength={40} value={name} onChange={e => setName(e.target.value)} required />}
+          <input className="input" type="email" placeholder={t('Email')} autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} required />
+          <input className="input" type="password" placeholder={register ? t('Password (12 characters minimum)') : t('Password')} autoComplete={register ? 'new-password' : 'current-password'} minLength={register ? 12 : undefined} maxLength={128} value={password} onChange={e => setPassword(e.target.value)} required />
+          {register && config?.invite_only && <input className="input" placeholder={t('Invite code')} maxLength={40} value={code} onChange={e => setCode(e.target.value.toUpperCase())} required />}
+          {register && <div className="dim small">{t('Email addresses are not verified. Keep your password safe or add a passkey after signing in.')}</div>}
+          <Button variant="primary" disabled={busy}>{register ? t('Create account') : t('Sign in with email')}</Button>
+        </>}
+      </form>
+      {!forgot ? <button className="plainbtn dim small" style={{ marginTop: 12 }} onClick={() => setRegister(v => !v)}>
+        {register ? t('Already have an account? Sign in') : t('New here? Create an account')}
+      </button> : <button className="plainbtn dim small" style={{ marginTop: 12 }} onClick={() => setForgot(false)}>{t('Back to sign in')}</button>}
+      {!register && !forgot && <button className="plainbtn dim small" style={{ marginTop: 8 }} onClick={() => setForgot(true)}>{t('Forgot password?')}</button>}
       {canGuest && <Button variant="ghost" className="dim" onClick={() => setGuest(true)}>{t('Continue without account')}</Button>}
       <div className="dim small" style={{ marginTop: 26, lineHeight: 1.5 }}>{t('Passkeys use {0} — no passwords.', BIO)}<br />{t('Each profile keeps its own plan, workouts & body weight.')}</div>
     </div>

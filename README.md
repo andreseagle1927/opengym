@@ -15,7 +15,7 @@
 **A self-hosted gym & body-weight tracker you actually own.**
 
 Plan your week, run guided workouts, track every set and your body weight over time —
-on your phone, synced across devices, behind your own passkey login.
+on your phone, synced across devices, behind passkeys, passwords, or Google/Apple sign-in.
 No account on someone else's server, no subscription, no ads. Just `docker compose up`.
 
 <br>
@@ -93,7 +93,7 @@ as a home-screen app, passkey sign-in, offline support, sync across your phone a
 - 📥 **Bring your history with you** — import from **FitNotes** (Android and iOS), **Strong** and **Hevy**, or body weight straight out of an **Apple Health** export. Exercise names are matched against the library and anything unrecognised becomes one of your own exercises, so nothing in the file is dropped
 - 📦 **Yours to keep** — one-tap JSON export/import, guest mode, **no telemetry**
 - 🤖 **Ask an AI about your training** (optional) — an [MCP server](mcp/README.md) lets a client like Claude Desktop or Cursor read your history in your own words: *"what did I bench last week?"*. Read-only, spawned locally by the client, nothing leaves your box. Not in the Docker build — if you don't use an AI assistant, it isn't there
-- 📱 **Standalone Android app** — the whole tracker as a sideloadable APK: no account, no server, data on the phone, native workout reminders ([download](https://opengym.duarte-santos.ch))
+- 📱 **Mobile app** — the tracker as a sideloadable Android APK or iOS app, with offline local use and optional sign-in/sync to your server
 
 ## Quick start (self-host)
 
@@ -115,12 +115,11 @@ a build step locally either way.
 > Want it reachable from your phone over the internet with passkeys? You'll need an HTTPS
 > domain — a two-line change in `.env`. See **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**.
 
-## Mobile app (no server at all)
+## Mobile app (offline-first)
 
-The same codebase also builds a **standalone mobile app** (Capacitor): no account, no sync,
-no backend — everything stays on the phone, with native workout-day reminders and share-sheet
-backups. Self-hosting gets you multi-device sync and profiles for friends & family; the
-mobile app is the install-and-done flavor.
+The same codebase builds an **offline-first mobile app** (Capacitor): workouts stay on the phone
+and keep working offline, with native workout-day reminders and share-sheet backups. Sign in to
+your self-hosted server when you want profiles and multi-device sync.
 
 - **Android:** [**download the APK**](https://opengym.duarte-santos.ch) and sideload it —
   openGym is deliberately not on the Play Store. Or build it yourself: **[docs/MOBILE.md](docs/MOBILE.md)**.
@@ -172,10 +171,34 @@ All via `.env` (see `.env.example`):
 | `INVITE_ONLY` | Require an invite code to create a profile           | *(off)*                 |
 | `ALLOW_GUEST` | Offer "Continue without account" — set `0` to require a profile | *(on)*       |
 | `VAPID_SUBJECT` | Contact URL sent with push notifications           | your `ORIGIN`           |
+| `GOOGLE_CLIENT_IDS` | Allowed Google ID-token audiences, comma-separated | *(disabled)* |
+| `GOOGLE_WEB_CLIENT_ID` | Web/Android Google OAuth client ID             | *(disabled)* |
+| `GOOGLE_IOS_CLIENT_ID` | iOS Google OAuth client ID                     | *(disabled)* |
+| `APPLE_IOS_CLIENT_ID` | iOS Apple App ID / bundle ID                  | *(disabled)* |
+| `APPLE_CLIENT_IDS` | Allowed Apple ID-token audiences, comma-separated | *(disabled)* |
+| `APPLE_WEB_CLIENT_ID` | Apple Services ID for web/Android             | *(disabled)* |
+| `APPLE_REDIRECT_URL` | Registered Apple callback URL                   | *(disabled)* |
+| `APP_ORIGINS` | Additional native app origins allowed by CORS        | *(Capacitor local origins)* |
 
 Push notification keys are generated on first run and saved to `./data/vapid.json` — nothing to set.
 `DATA_DIR` is pinned to `/data` by `docker-compose.yml` and mapped to `./data` on the host; change the
 host side of that volume, not the variable.
+
+## Accounts and sign-in
+
+Self-hosted accounts can use passkeys, email/password, Google, or Apple. Google and Apple are
+disabled until their client IDs are configured in `.env`; the API verifies provider ID tokens and
+stores provider identities against the same OpenGym profile. Native sessions use a bearer token
+stored in the platform's secure storage, while the web app keeps its HTTP-only session cookie.
+
+Password accounts require at least 12 characters and store an Argon2id hash. This setup does not
+send email: password-account addresses are unverified, and forgotten passwords must be reset by an
+administrator from the Admin page using a one-time code. Configure `ADMIN_UIDS` before relying on
+that recovery path. Provider client IDs and the Apple callback must match the IDs/URLs registered
+with Google and Apple. Never put Apple private keys or other server secrets in the frontend or app.
+
+For exact Google/Apple console setup, Hetzner environment values, Android/iOS app association, and
+the first-admin setup, see [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
 
 ## Roadmap
 
@@ -195,9 +218,9 @@ Rough, community-driven — ideas and PRs welcome:
 ## Tech
 
 React 19 + Vite (React Router, Zustand) · Node (no framework) · nginx · Docker Compose ·
-WebAuthn · exercise data from [hasaneyldrm/exercises-dataset](https://github.com/hasaneyldrm/exercises-dataset).
-No database server, no cloud dependencies — the frontend builds inside Docker, so self-hosting
-stays a one-command `docker compose up`.
+WebAuthn · Argon2id · optional Google/Apple OIDC · exercise data from [hasaneyldrm/exercises-dataset](https://github.com/hasaneyldrm/exercises-dataset).
+No database server is required. Google and Apple sign-in are optional external identity providers;
+the frontend builds inside Docker, so self-hosting stays a one-command `docker compose up`.
 
 The training logic — progression rules, 1RM estimation, how a logged session is read back —
 lives in pure functions under `frontend/src/lib/` with tests next to them: `npm test` in

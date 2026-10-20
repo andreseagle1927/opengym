@@ -4,7 +4,7 @@ import { useStore, DEF, hasData } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
 import { ACCENTS, todayISO, localTZ } from '../lib/format.js'
 import { effortOf } from '../lib/history.js'
-import { api, webauthnOK, passkeyLogin, passkeyRegister, IS_ANDROID } from '../lib/api.js'
+import { api, webauthnOK, passkeyLogin, passkeyRegister, linkProvider, linkPassword, changePassword, socialProviderEnabled, IS_ANDROID } from '../lib/api.js'
 import { pushSupported, enablePush, disablePush, sendTestPush } from '../lib/push.js'
 import { wakeLockSupported } from '../lib/wakelock.js'
 import { t, LANGS, INSTR_LANGS } from '../lib/i18n.js'
@@ -18,6 +18,7 @@ export default function Settings() {
   const nav = useNavigate()
   const S = useStore(s => s.S)
   const user = useStore(s => s.user)
+  const config = useStore(s => s.config)
   const { update, replaceState, setUser, pullState, pushState, signOut, signOutAll, resetDemo } = useStore()
   const toast = useUI(s => s.toast)
   const fileRef = useRef(null)
@@ -52,6 +53,44 @@ export default function Settings() {
     try { const u = await passkeyLogin(); setUser(u); await pullState(); toast(t('Welcome back, {0}', u.name)) }
     catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') toast(e.message || t('Sign-in failed')) }
   }
+  const linkSocial = async provider => {
+    try {
+      const { user: updated } = await linkProvider(provider, config)
+      setUser(updated)
+      toast(provider === 'google' ? 'Google account linked' : 'Apple account linked')
+    } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') toast(e.message || 'Could not link account') }
+  }
+  const addPassword = () => useUI.getState().openSheet(close => <>
+    <h3>{t('Add email and password')}</h3>
+    <div className="muted small" style={{ marginBottom: 12 }}>{t('Email addresses are not verified. Forgotten passwords must be reset by an administrator.')}</div>
+    <form onSubmit={async ev => {
+      ev.preventDefault()
+      const data = new FormData(ev.currentTarget)
+      try {
+        const { user: updated } = await linkPassword({ email: data.get('email'), password: data.get('password') })
+        setUser(updated); close(); toast(t('Password sign-in added'))
+      } catch (e) { toast(e.message || t('Could not add password')) }
+    }} style={{ display: 'grid', gap: 10 }}>
+      <input className="input" type="email" name="email" placeholder={t('Email')} autoComplete="email" required />
+      <input className="input" type="password" name="password" placeholder={t('Password (12 characters minimum)')} minLength={12} maxLength={128} autoComplete="new-password" required />
+      <Button variant="primary">{t('Add password')}</Button>
+    </form>
+  </>)
+  const editPassword = () => useUI.getState().openSheet(close => <>
+    <h3>{t('Change password')}</h3>
+    <form onSubmit={async ev => {
+      ev.preventDefault()
+      const data = new FormData(ev.currentTarget)
+      try {
+        const { user: updated } = await changePassword({ password: data.get('current'), newPassword: data.get('next') })
+        setUser(updated); close(); toast(t('Password changed'))
+      } catch (e) { toast(e.message || t('Could not change password')) }
+    }} style={{ display: 'grid', gap: 10 }}>
+      <input className="input" type="password" name="current" placeholder={t('Current password')} autoComplete="current-password" required />
+      <input className="input" type="password" name="next" placeholder={t('New password (12 characters minimum)')} minLength={12} maxLength={128} autoComplete="new-password" required />
+      <Button variant="primary">{t('Change password')}</Button>
+    </form>
+  </>)
   const registerHere = () => useUI.getState().openSheet(close => <RegisterInline close={close} setUser={setUser} pushState={pushState} pullState={pullState} toast={toast} />)
   // Ends the profile's sessions on every device — this one included, so on success it lands in
   // the same place as the plain sign-out above (home, local data cleared). On failure nothing
@@ -72,12 +111,15 @@ export default function Settings() {
       <div style={{ flex: 1, marginLeft: 10 }}><h1>{t('Settings')}</h1></div>
     </div>
 
-    {/* ---------- account (demo and mobile builds have nothing to sign in to) ---------- */}
+    {/* ---------- account ---------- */}
     <Section title={MOBILE ? t('Your data') : DEMO ? t('Demo') : t('Account')}>
-      {MOBILE ? <>
-        <Row icon="lock" iconTint="var(--acc)" title={t('All data stays on this phone')} subtitle={t('No account, no cloud — back it up anytime with Export below.')} />
-        <Row icon="rocket" iconTint="var(--indigo)" title={t('Self-host openGym')} subtitle={t('Passkey sign-in, sync across your devices, your own data.')} accessory="chevron"
-          onClick={() => window.open(REPO, '_blank', 'noopener')} />
+      {MOBILE ? user ? <>
+        <Row icon="person" iconTint="var(--acc)" title={t('Signed in as {0}', user.name)} subtitle={t('Your profile syncs with your OpenGym server.')} />
+        <Row icon="person" iconTint="var(--blue)" title={t('Sign out')} accessory="chevron" onClick={async () => { await signOut(); nav('/home') }} />
+        <Row icon="shield" iconTint="var(--red)" title={t('Sign out everywhere')} danger onClick={signOutEverywhere} />
+      </> : <>
+        <Row icon="lock" iconTint="var(--acc)" title={t('Local mode')} subtitle={t('Your workouts stay on this phone until you sign in and sync.')} />
+        <Row icon="person" iconTint="var(--blue)" title={t('Sign in or create an account')} accessory="chevron" onClick={() => useStore.getState().setGuest(false)} />
       </> : DEMO ? <>
         <Row icon="sparkles" iconTint="var(--acc)" title={t('You’re in the demo')} subtitle={t('Example data, stored only in this browser — change anything you like.')} />
         <Row icon="reset" iconTint="var(--blue)" title={t('Reset demo data')} accessory="chevron"
@@ -96,6 +138,13 @@ export default function Settings() {
         <Row icon="lock" iconTint="var(--grey)" title={t('Passkeys not supported in this browser.')} />
       )}
     </Section>
+    {!!user && !DEMO && <Section title={t('Sign-in methods')} footer={t('Linking a provider adds another way to access this same profile.') }>
+      {(user.authMethods || []).map(method => <Row key={method} icon="check" iconTint="var(--green)" title={method === 'passkey' ? t('Passkey connected') : method === 'password' ? t('Email and password connected') : t('{0} connected', method[0].toUpperCase() + method.slice(1))} />)}
+      {(user.authMethods || []).includes('password') && <Row icon="lock" iconTint="var(--acc)" title={t('Change password')} accessory="chevron" onClick={editPassword} />}
+      {socialProviderEnabled('google', config) && !(user.authMethods || []).includes('google') && <Row icon="sparkles" iconTint="var(--blue)" title={t('Link Google account')} accessory="chevron" onClick={() => linkSocial('google')} />}
+      {socialProviderEnabled('apple', config) && !(user.authMethods || []).includes('apple') && <Row icon="person" iconTint="var(--grey)" title={t('Link Apple account')} accessory="chevron" onClick={() => linkSocial('apple')} />}
+      {!(user.authMethods || []).includes('password') && <Row icon="lock" iconTint="var(--acc)" title={t('Add email and password')} accessory="chevron" onClick={addPassword} />}
+    </Section>}
     {!user && !DEMO && !MOBILE && <p className="sect-f" style={{ marginTop: -18, marginBottom: 22 }}>{t('Guest mode — data lives only in this browser.')}</p>}
 
     {/* ---------- general ---------- */}

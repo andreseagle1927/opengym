@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { api } from '../lib/api.js'
+import { api, clearSessionToken, prepareSocialLogin } from '../lib/api.js'
 import { localTZ } from '../lib/format.js'
 import { registerCustom } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
@@ -74,6 +74,7 @@ export const useStore = create((set, get) => {
   // Everything a sign-out leaves behind on this device, whichever way it was triggered.
   const clearLocalSession = () => {
     get().setUser(null)
+    clearSessionToken().catch(() => {})
     localStorage.removeItem('gym_guest')
     localStorage.removeItem('gym_dirty')
     localStorage.removeItem(KEY)
@@ -102,7 +103,12 @@ export const useStore = create((set, get) => {
     config: null,
     async loadConfig() {
       if (get().config) return get().config
-      try { const c = await api('/api/config'); set({ config: c }); return c }
+      try {
+        const c = await api('/api/config')
+        set({ config: c })
+        try { await prepareSocialLogin(c) } catch {}
+        return c
+      }
       catch { return null }
     },
 
@@ -158,8 +164,8 @@ export const useStore = create((set, get) => {
 
     // Boot: ask the server who we are, then pull.
     async boot() {
-      // Mobile build: no backend either — restore from the file mirror (the durable copy;
-      // localStorage may have been evicted since the last run) and go straight in.
+      // Restore the durable native copy first. When the self-hosted API is reachable, use the
+      // same account/sync flow as the web app; if it is offline, keep the app usable locally.
       if (MOBILE) {
         const saved = await nativeLoad()
         const S = get().S
@@ -168,8 +174,15 @@ export const useStore = create((set, get) => {
         } else if (hasData(S)) {
           nativeSave(S)   // first run after an update from a file-less version: seed the mirror
         }
-        get().setGuest(true)
         syncReminder(get().S)
+        const cfg = await get().loadConfig()
+        if (cfg) {
+          try {
+            const me = await api('/api/me')
+            get().setUser(me.user)
+            await get().pullState()
+          } catch { get().setUser(null); await clearSessionToken(); get().setGuest(false) }
+        } else get().setGuest(true)
         set({ ready: true })
         return
       }

@@ -5,16 +5,21 @@ openGym ships in two flavors from the same codebase:
 | | **Self-hosted** (this repo's default) | **Mobile app** (`VITE_MOBILE=1`) |
 |---|---|---|
 | Runs | in any browser, against your own server | natively on iPhone / Android (Capacitor shell) |
-| Accounts | passkey sign-in, one profile per person | none — the phone *is* the account |
-| Data | synced to your server, readable on desktop | stays on the device (file in the app's private storage) |
+| Accounts | passkey, password, Google, or Apple sign-in | same account methods; local guest use remains available |
+| Data | synced to your server, readable on desktop | local copy plus optional sync to `gym.adrenocromo.com` |
 | Reminders | Web Push from your server | native local notifications, no server involved |
 | Exercise media | served by your server (`img/`, `gif/`) | loaded from the jsDelivr CDN |
 
-The mobile flavor never talks to a backend: no sign-in screen, no sync, no telemetry.
-State is mirrored from `localStorage` into `opengym-state.json` in the app's private data
-directory on every change (iOS is allowed to evict WebView storage under pressure — the
-file mirror is the durable copy and is restored on launch). Backups go out through the
-OS share sheet instead of a browser download.
+The mobile flavor keeps a durable local copy and can also sign in to the configured OpenGym
+server. Its API token is stored in iOS Keychain or Android secure storage. If the server is
+unreachable, the app remains usable with the local copy. State is mirrored from `localStorage`
+into `opengym-state.json` in the app's private data directory on every change (iOS is allowed to
+evict WebView storage under pressure — the file mirror is restored on launch). Backups go out
+through the OS share sheet instead of a browser download.
+
+The default mobile API URL is `https://gym.adrenocromo.com`; override it at build time with
+`VITE_API_BASE_URL`. Google/Apple buttons appear only after the corresponding provider client IDs
+are configured on that server. See the Accounts and sign-in section in the root README.
 
 ## Prerequisites
 

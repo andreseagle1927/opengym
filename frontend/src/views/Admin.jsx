@@ -25,6 +25,7 @@ const dur = ms => { const m = Math.max(0, Math.floor(ms / 60000)); return m < 60
 
 function UserDetail({ id, onChanged, close }) {
   const [d, setD] = useState(null)
+  const [resetCode, setResetCode] = useState('')
   const toast = useUI(s => s.toast)
   useEffect(() => { api('/api/admin/user?id=' + encodeURIComponent(id)).then(setD).catch(e => toast(e.message)) }, [id])
   if (!d) return <div className="muted small">Loading…</div>
@@ -33,6 +34,12 @@ function UserDetail({ id, onChanged, close }) {
     api('/api/admin/user/disable', { method: 'POST', body: JSON.stringify({ id: u.id, disabled }) })
       .then(() => { toast(disabled ? 'User disabled' : 'User enabled'); onChanged(); close() })
       .catch(e => toast(e.message))
+  }
+  const issuePasswordReset = async () => {
+    try {
+      const { code } = await api('/api/admin/user/password-reset', { method: 'POST', body: JSON.stringify({ id: u.id }) })
+      setResetCode(code)
+    } catch (e) { toast(e.message || 'Could not issue reset code') }
   }
   return <>
     <h3 className="capitalize">{u.name}</h3>
@@ -52,6 +59,14 @@ function UserDetail({ id, onChanged, close }) {
       onClick={() => u.disabled ? setDisabled(false)
         : confirmSheet({ title: 'Disable ' + u.name + '?', message: 'They are signed out everywhere and can no longer sync or log in until re-enabled.', confirmText: 'Disable', danger: true, onConfirm: () => setDisabled(true) })}>
       {u.disabled ? 'Enable account' : 'Disable account'}</button>}
+    {u.authMethods?.includes('password') && <>
+      <button className="btn plain" style={{ margin: '8px 0 4px' }} onClick={issuePasswordReset}>Issue password reset code</button>
+      {resetCode && <div className="card small" style={{ marginTop: 8 }}>
+        <div className="muted">Share this one-time code with the account owner. It expires in 15 minutes.</div>
+        <code style={{ display: 'block', overflowWrap: 'anywhere', margin: '8px 0' }}>{resetCode}</code>
+        <button className="btn plain" onClick={() => navigator.clipboard?.writeText(resetCode).then(() => toast('Reset code copied'))}>Copy code</button>
+      </div>}
+    </>}
     <h4 className="sec">Workout history</h4>
     {d.workouts.length ? <div className="list" style={{ gap: 0 }}>
       {d.workouts.slice(0, 60).map(w => <div key={w.id} className="row between" style={{ padding: '9px 2px', borderBottom: '1px solid var(--sep)' }}>

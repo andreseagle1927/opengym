@@ -1,4 +1,4 @@
-package ch.duartesantos.opengym;
+package com.adrenocromo.gym;
 
 import com.getcapacitor.BridgeActivity;
 

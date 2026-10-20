@@ -1,0 +1,25 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "web",
+      "site": "https://gym.adrenocromo.com"
+    }
+  },
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.adrenocromo.gym",
+      "sha256_cert_fingerprints": [
+        "42:41:C2:B2:A5:33:91:D5:87:16:3C:E7:BE:22:D7:44:F7:53:72:5F:6F:F7:5F:1A:26:28:D2:51:9D:26:D6:9E"
+      ]
+    }
+  }
+]

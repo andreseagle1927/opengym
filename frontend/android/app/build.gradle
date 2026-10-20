@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace "ch.duartesantos.opengym"
+    namespace "com.adrenocromo.gym"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "ch.duartesantos.opengym"
+        applicationId "com.adrenocromo.gym"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 8

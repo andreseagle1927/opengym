@@ -4,6 +4,8 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Algorithm, hash as hashPassword, verify as verifyPassword } from '@node-rs/argon2';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
   generateAuthenticationOptions, verifyAuthenticationResponse
@@ -29,6 +31,17 @@ const ALLOW_GUEST = !/^(0|false|no|off)$/i.test(process.env.ALLOW_GUEST || '');
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
 // baked into each cookie when it's issued, so lowering this never cuts an existing session short.
 const SESSION_DAYS = Math.max(1, +(process.env.SESSION_DAYS || 90) || 90);
+const GOOGLE_CLIENT_IDS = (process.env.GOOGLE_CLIENT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const APPLE_CLIENT_IDS = (process.env.APPLE_CLIENT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const GOOGLE_WEB_CLIENT_ID = process.env.GOOGLE_WEB_CLIENT_ID || '';
+const GOOGLE_IOS_CLIENT_ID = process.env.GOOGLE_IOS_CLIENT_ID || '';
+const APPLE_IOS_CLIENT_ID = process.env.APPLE_IOS_CLIENT_ID || '';
+const APPLE_WEB_CLIENT_ID = process.env.APPLE_WEB_CLIENT_ID || '';
+const APPLE_REDIRECT_URL = process.env.APPLE_REDIRECT_URL || '';
+const NATIVE_REDIRECT_URI = process.env.NATIVE_REDIRECT_URI || 'com.adrenocromo.gym://auth/callback';
+const APP_ORIGINS = new Set([ORIGIN, 'capacitor://localhost', 'http://localhost', 'https://localhost', ...(process.env.APP_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)]);
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+const appleKeys = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -43,8 +56,13 @@ const SECRET = fs.readFileSync(secretFile, 'utf8').trim();
 const dbFile = path.join(DATA, 'db.json');
 let db = { users: [], creds: [], subs: [], invites: [] };
 try { db = JSON.parse(fs.readFileSync(dbFile, 'utf8')); } catch {}
+db.users = db.users || [];
+db.creds = db.creds || [];
 db.subs = db.subs || [];
 db.invites = db.invites || [];
+db.identities = db.identities || [];
+db.passwords = db.passwords || [];
+db.passwordResets = db.passwordResets || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
 function atomicWrite(file, content) {
@@ -178,7 +196,8 @@ function readSession(req) {
   const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => {
     const i = c.indexOf('='); return i < 0 ? ['', ''] : [c.slice(0, i).trim(), c.slice(i + 1).trim()];
   }));
-  const tok = cookies.gymsid;
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  const tok = bearer?.[1] || cookies.gymsid;
   if (!tok) return null;
   const payload = verifySig(tok);
   if (!payload) return null;
@@ -205,8 +224,101 @@ function sessionCookie(user) {
 }
 const clearCookie = `gymsid=; Path=/; Max-Age=0; HttpOnly;${SECURE} SameSite=Lax`;
 
+function publicUser(user) {
+  const methods = new Set();
+  if (db.creds.some(c => c.userId === user.id)) methods.add('passkey');
+  if (db.passwords.some(p => p.userId === user.id)) methods.add('password');
+  for (const identity of db.identities.filter(i => i.userId === user.id)) methods.add(identity.provider);
+  return { id: user.id, name: user.name, admin: isAdmin(user), authMethods: [...methods] };
+}
+function authReply(req, res, user, body = {}) {
+  if (body.client === 'native') {
+    return json(res, 200, { user: publicUser(user), sessionToken: makeSession(user), expiresIn: SESSION_DAYS * 86400 });
+  }
+  return json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(user) });
+}
+function newUser(name) {
+  const user = { id: crypto.randomBytes(12).toString('base64url'), name: String(name || '').trim().slice(0, 40) || 'Athlete', created: new Date().toISOString() };
+  db.users.push(user);
+  return user;
+}
+function consumeInvite(code, user) {
+  if (!INVITE_ONLY) return true;
+  const invite = db.invites.find(i => i.code === String(code || '').trim().toUpperCase() && !i.usedBy && !i.revoked);
+  if (!invite) return false;
+  invite.usedBy = user.id; invite.usedAt = user.created; user.invitedBy = invite.code;
+  return true;
+}
+const normalizeEmail = value => String(value || '').trim().toLowerCase();
+const emailOk = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254;
+const passwordOk = value => typeof value === 'string' && value.length >= 12 && value.length <= 128;
+const pendingPasswordEmails = new Set();
+async function idTokenClaims(provider, token, expectedNonce) {
+  if (provider === 'google') {
+    if (!GOOGLE_CLIENT_IDS.length) throw Object.assign(new Error('Google sign-in is not configured'), { status: 503 });
+    const { payload } = await jwtVerify(token, googleKeys, { issuer: ['https://accounts.google.com', 'accounts.google.com'], audience: GOOGLE_CLIENT_IDS });
+    if (expectedNonce && payload.nonce !== expectedNonce) throw Object.assign(new Error('sign-in challenge did not match'), { status: 401 });
+    if (!payload.sub) throw Object.assign(new Error('Google identity is missing'), { status: 401 });
+    return { sub: String(payload.sub), email: normalizeEmail(payload.email), emailVerified: payload.email_verified === true, name: payload.name };
+  }
+  if (provider === 'apple') {
+    if (!APPLE_CLIENT_IDS.length) throw Object.assign(new Error('Apple sign-in is not configured'), { status: 503 });
+    const { payload } = await jwtVerify(token, appleKeys, { issuer: 'https://appleid.apple.com', audience: APPLE_CLIENT_IDS });
+    if (expectedNonce && payload.nonce !== crypto.createHash('sha256').update(expectedNonce).digest('hex')) throw Object.assign(new Error('sign-in challenge did not match'), { status: 401 });
+    if (!payload.sub) throw Object.assign(new Error('Apple identity is missing'), { status: 401 });
+    return { sub: String(payload.sub), email: normalizeEmail(payload.email), emailVerified: payload.email_verified === true || payload.email_verified === 'true', name: '' };
+  }
+  throw Object.assign(new Error('unsupported identity provider'), { status: 400 });
+}
+async function finishProviderAuth(req, res, provider, body, link = false) {
+  const config = provider === 'google' ? GOOGLE_CLIENT_IDS : APPLE_CLIENT_IDS;
+  if (!config.length) return json(res, 503, { error: provider[0].toUpperCase() + provider.slice(1) + ' sign-in is not configured' });
+  const challenge = takeChallenge(body.cid);
+  if (!challenge || challenge.provider !== provider) return json(res, 400, { error: 'sign-in challenge expired — try again' });
+  let claims;
+  try { claims = await idTokenClaims(provider, String(body.idToken || ''), challenge.nonce); }
+  catch (e) { return json(res, e.status || 401, { error: e.message || 'identity token could not be verified' }); }
+  const identity = db.identities.find(x => x.provider === provider && x.sub === claims.sub);
+  if (link) {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'sign in before linking an account' });
+    if (identity && identity.userId !== user.id) return json(res, 409, { error: 'this provider account belongs to another profile' });
+    if (!identity) db.identities.push({ provider, sub: claims.sub, userId: user.id, email: claims.email || null, emailVerified: claims.emailVerified, linkedAt: new Date().toISOString() });
+    if (claims.email && claims.emailVerified && !user.email) user.email = claims.email;
+    saveDb();
+    return json(res, 200, { user: publicUser(user) });
+  }
+  let user = identity ? db.users.find(u => u.id === identity.userId) : null;
+  if (identity && !user) return json(res, 500, { error: 'linked profile is missing' });
+  if (!user) {
+    user = newUser(String(body.name || claims.name || 'Athlete'));
+    if (!consumeInvite(body.code, user)) { db.users.pop(); return json(res, 403, { error: 'a valid invite code is required' }); }
+    if (claims.email && claims.emailVerified) user.email = claims.email;
+    db.identities.push({ provider, sub: claims.sub, userId: user.id, email: claims.email || null, emailVerified: claims.emailVerified, linkedAt: new Date().toISOString() });
+  }
+  if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
+  saveDb();
+  return authReply(req, res, user, body);
+}
+
 /* ---------- challenge store (in-memory, 5 min TTL) ---------- */
 const challenges = new Map(); // cid -> {challenge, name?, uid?, exp}
+const appleOAuthStates = new Map();
+const nativeAuthCodes = new Map();
+const authBuckets = new Map();
+function limitAuth(req, res, action, max, windowMs) {
+  const ip = String(req.headers['x-real-ip'] || req.socket.remoteAddress || 'unknown').slice(0, 80);
+  const key = action + ':' + ip, now = Date.now();
+  let bucket = authBuckets.get(key);
+  if (!bucket || now - bucket.start >= windowMs) bucket = { start: now, count: 0 };
+  bucket.count++;
+  authBuckets.set(key, bucket);
+  if (bucket.count <= max) return true;
+  const retry = Math.max(1, Math.ceil((bucket.start + windowMs - now) / 1000));
+  json(res, 429, { error: 'too many attempts; try again shortly' }, { 'Retry-After': String(retry) });
+  return false;
+}
+setInterval(() => { const cutoff = Date.now() - 3600000; for (const [k, v] of authBuckets) if (v.start < cutoff) authBuckets.delete(k); }, 60000).unref();
 function putChallenge(data) {
   const cid = crypto.randomBytes(16).toString('base64url');
   challenges.set(cid, { ...data, exp: Date.now() + 5 * 60000 });
@@ -219,6 +331,11 @@ function takeChallenge(cid) {
   return c;
 }
 setInterval(() => { for (const [k, v] of challenges) if (v.exp < Date.now()) challenges.delete(k); }, 60000).unref();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of appleOAuthStates) if (v.expires < now) appleOAuthStates.delete(k);
+  for (const [k, v] of nativeAuthCodes) if (v.expires < now) nativeAuthCodes.delete(k);
+}, 60000).unref();
 
 /* ---------- helpers ---------- */
 function json(res, code, obj, extraHeaders) {
@@ -241,6 +358,15 @@ function readBody(req) {
     req.on('error', reject);
   });
 }
+async function readFormBody(req) {
+  const chunks = []; let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 64 * 1024) throw Object.assign(new Error('form too large'), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString('utf8')));
+}
 const b64uToBuf = s => Buffer.from(s, 'base64url');
 
 /* ---------- live presence (in-memory) ---------- */
@@ -261,12 +387,209 @@ const routes = {
   'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
 
   // Public config the login screen needs before anyone is signed in.
-  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST }),
+  'GET /api/config': async (req, res) => json(res, 200, {
+    invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST,
+    rp_id: RP_ID,
+    password_enabled: true,
+    google_enabled: GOOGLE_CLIENT_IDS.includes(GOOGLE_WEB_CLIENT_ID) && !!GOOGLE_WEB_CLIENT_ID,
+    google_ios_enabled: GOOGLE_CLIENT_IDS.includes(GOOGLE_WEB_CLIENT_ID) && !!GOOGLE_WEB_CLIENT_ID && !!GOOGLE_IOS_CLIENT_ID,
+    apple_enabled: APPLE_CLIENT_IDS.includes(APPLE_WEB_CLIENT_ID) && !!APPLE_WEB_CLIENT_ID && !!APPLE_REDIRECT_URL,
+    apple_native_enabled: APPLE_CLIENT_IDS.includes(APPLE_IOS_CLIENT_ID) && !!APPLE_IOS_CLIENT_ID,
+    google_client_id: GOOGLE_WEB_CLIENT_ID || null,
+    google_ios_client_id: GOOGLE_IOS_CLIENT_ID || null,
+    apple_ios_client_id: APPLE_IOS_CLIENT_ID || null,
+    apple_client_id: APPLE_WEB_CLIENT_ID || null,
+    apple_redirect_url: APPLE_REDIRECT_URL || null,
+    google_redirect_url: GOOGLE_WEB_CLIENT_ID ? ORIGIN.replace(/\/$/, '') + '/' : null
+  }),
+
+  'POST /api/auth/password/register': async (req, res) => {
+    if (!limitAuth(req, res, 'password-register', 8, 60 * 60 * 1000)) return;
+    const body = await readBody(req);
+    const email = normalizeEmail(body.email), password = body.password;
+    const name = String(body.name || '').trim().slice(0, 40);
+    if (!emailOk(email)) return json(res, 400, { error: 'enter a valid email address' });
+    if (!passwordOk(password)) return json(res, 400, { error: 'password must be 12–128 characters' });
+    if (!name) return json(res, 400, { error: 'name required' });
+    if (db.passwords.some(p => p.email === email) || pendingPasswordEmails.has(email)) return json(res, 409, { error: 'an account already uses that email; sign in and add another sign-in method in settings' });
+    pendingPasswordEmails.add(email);
+    const user = newUser(name);
+    if (!consumeInvite(body.code, user)) { db.users.pop(); pendingPasswordEmails.delete(email); return json(res, 403, { error: 'a valid invite code is required' }); }
+    try {
+      const encoded = await hashPassword(password, { algorithm: Algorithm.Argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+      user.email = email; user.emailVerified = false;
+      db.passwords.push({ userId: user.id, email, hash: encoded, created: new Date().toISOString() });
+      saveDb();
+      return authReply(req, res, user, body);
+    } catch (e) {
+      db.users = db.users.filter(u => u.id !== user.id);
+      if (user.invitedBy) { const inv = db.invites.find(i => i.code === user.invitedBy); if (inv) { delete inv.usedBy; delete inv.usedAt; } }
+      throw e;
+    } finally {
+      pendingPasswordEmails.delete(email);
+    }
+  },
+
+  'POST /api/auth/password/login': async (req, res) => {
+    if (!limitAuth(req, res, 'password-login', 10, 5 * 60 * 1000)) return;
+    const body = await readBody(req);
+    const email = normalizeEmail(body.email);
+    const credential = db.passwords.find(p => p.email === email);
+    if (!credential) return json(res, 401, { error: 'email or password is incorrect' });
+    let valid = false;
+    try { valid = await verifyPassword(credential.hash, String(body.password || '')); } catch {}
+    if (!valid) return json(res, 401, { error: 'email or password is incorrect' });
+    const user = db.users.find(u => u.id === credential.userId);
+    if (!user || user.disabled) return json(res, 403, { error: 'this account is unavailable' });
+    return authReply(req, res, user, body);
+  },
+
+  'POST /api/auth/password/link': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'sign in before adding a password' });
+    const body = await readBody(req);
+    const email = normalizeEmail(body.email), password = body.password;
+    if (!emailOk(email)) return json(res, 400, { error: 'enter a valid email address' });
+    if (!passwordOk(password)) return json(res, 400, { error: 'password must be 12–128 characters' });
+    const existing = db.passwords.find(p => p.email === email);
+    if ((existing && existing.userId !== user.id) || pendingPasswordEmails.has(email)) return json(res, 409, { error: 'that email is already used by another account' });
+    if (existing) return json(res, 409, { error: 'this profile already has a password; use change password' });
+    pendingPasswordEmails.add(email);
+    try {
+      const encoded = await hashPassword(password, { algorithm: Algorithm.Argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+      user.email = email; user.emailVerified = false;
+      db.passwords.push({ userId: user.id, email, hash: encoded, created: new Date().toISOString() });
+      saveDb();
+    } finally { pendingPasswordEmails.delete(email); }
+    return json(res, 200, { user: publicUser(user) });
+  },
+
+  'POST /api/auth/password/change': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const body = await readBody(req);
+    const credential = db.passwords.find(p => p.userId === user.id);
+    if (!credential) return json(res, 404, { error: 'this profile has no password yet' });
+    if (String(body.password || '').length < 1 || !await verifyPassword(credential.hash, String(body.password))) return json(res, 401, { error: 'current password is incorrect' });
+    if (!passwordOk(body.newPassword)) return json(res, 400, { error: 'new password must be 12–128 characters' });
+    credential.hash = await hashPassword(body.newPassword, { algorithm: Algorithm.Argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+    user.sv = sessionVersion(user) + 1;
+    saveDb();
+    return authReply(req, res, user, body);
+  },
+
+  'POST /api/auth/provider/challenge': async (req, res) => {
+    if (!limitAuth(req, res, 'provider-challenge', 30, 5 * 60 * 1000)) return;
+    const body = await readBody(req), provider = String(body.provider || '').toLowerCase();
+    if (!['google', 'apple'].includes(provider)) return json(res, 400, { error: 'unsupported identity provider' });
+    if (!(provider === 'google' ? GOOGLE_CLIENT_IDS.length : APPLE_CLIENT_IDS.length)) return json(res, 503, { error: provider + ' sign-in is not configured' });
+    const nonce = crypto.randomBytes(24).toString('base64url');
+    const cid = putChallenge({ provider, nonce });
+    json(res, 200, { cid, nonce });
+  },
+  'POST /api/auth/provider/google': async (req, res) => finishProviderAuth(req, res, 'google', await readBody(req)),
+  'POST /api/auth/provider/apple': async (req, res) => finishProviderAuth(req, res, 'apple', await readBody(req)),
+  'POST /api/auth/provider/link/google': async (req, res) => finishProviderAuth(req, res, 'google', await readBody(req), true),
+  'POST /api/auth/provider/link/apple': async (req, res) => finishProviderAuth(req, res, 'apple', await readBody(req), true),
+
+  // Android native apps use Apple's HTTPS web authorization, then exchange a PKCE-bound,
+  // one-time callback code for the same bearer session returned to other native clients.
+  'POST /api/auth/provider/apple/start': async (req, res) => {
+    if (!limitAuth(req, res, 'apple-native-start', 20, 5 * 60 * 1000)) return;
+    if (!APPLE_CLIENT_IDS.length || !APPLE_WEB_CLIENT_ID || !APPLE_REDIRECT_URL) return json(res, 503, { error: 'Apple web sign-in is not configured' });
+    const body = await readBody(req);
+    const verifierChallenge = String(body.codeChallenge || '');
+    if (!/^[A-Za-z0-9_-]{43}$/.test(verifierChallenge)) return json(res, 400, { error: 'a valid PKCE challenge is required' });
+    const state = crypto.randomBytes(24).toString('base64url');
+    const nonce = crypto.randomBytes(24).toString('base64url');
+    appleOAuthStates.set(state, {
+      state, nonce, verifierChallenge,
+      name: String(body.name || '').trim().slice(0, 40),
+      inviteCode: String(body.code || '').trim().toUpperCase(),
+      expires: Date.now() + 5 * 60 * 1000
+    });
+    const authorize = new URL('https://appleid.apple.com/auth/authorize');
+    authorize.searchParams.set('client_id', APPLE_WEB_CLIENT_ID);
+    authorize.searchParams.set('redirect_uri', APPLE_REDIRECT_URL);
+    authorize.searchParams.set('response_type', 'code id_token');
+    authorize.searchParams.set('response_mode', 'form_post');
+    authorize.searchParams.set('scope', 'email name');
+    authorize.searchParams.set('state', state);
+    authorize.searchParams.set('nonce', crypto.createHash('sha256').update(nonce).digest('hex'));
+    json(res, 200, { authorizationUrl: authorize.toString(), state });
+  },
+  'POST /api/auth/apple/callback': async (req, res) => {
+    const body = await readFormBody(req);
+    const state = String(body.state || ''), flow = appleOAuthStates.get(state);
+    appleOAuthStates.delete(state);
+    const redirectError = error => {
+      const target = new URL(NATIVE_REDIRECT_URI);
+      target.searchParams.set('state', state);
+      target.searchParams.set('error', error);
+      res.writeHead(302, { Location: target.toString(), 'Cache-Control': 'no-store' }); res.end();
+    };
+    if (!flow || flow.expires < Date.now()) return redirectError('expired');
+    if (body.error || !body.id_token) return redirectError('cancelled');
+    let claims;
+    try { claims = await idTokenClaims('apple', body.id_token, flow.nonce); }
+    catch (e) { console.error('Apple callback token verification failed:', e.message); return redirectError('invalid_identity'); }
+    let identity = db.identities.find(i => i.provider === 'apple' && i.sub === claims.sub);
+    let user = identity ? db.users.find(u => u.id === identity.userId) : null;
+    if (identity && (!user || user.disabled)) return redirectError('account_unavailable');
+    if (!user) {
+      let appleName = '';
+      try {
+        const profile = JSON.parse(body.user || '{}');
+        appleName = [profile.name?.firstName, profile.name?.lastName].filter(Boolean).join(' ');
+      } catch {}
+      user = newUser(flow.name || appleName || claims.name || 'Athlete');
+      if (!consumeInvite(flow.inviteCode, user)) { db.users.pop(); return redirectError('invite_required'); }
+      if (claims.email && claims.emailVerified) user.email = claims.email;
+      identity = { provider: 'apple', sub: claims.sub, userId: user.id, email: claims.email || null, emailVerified: claims.emailVerified, linkedAt: new Date().toISOString() };
+      db.identities.push(identity);
+      saveDb();
+    }
+    const code = crypto.randomBytes(32).toString('base64url');
+    nativeAuthCodes.set(code, { userId: user.id, verifierChallenge: flow.verifierChallenge, expires: Date.now() + 2 * 60 * 1000 });
+    const target = new URL(NATIVE_REDIRECT_URI);
+    target.searchParams.set('code', code);
+    target.searchParams.set('state', state);
+    res.writeHead(302, { Location: target.toString(), 'Cache-Control': 'no-store' }); res.end();
+  },
+  'POST /api/auth/native/exchange': async (req, res) => {
+    const body = await readBody(req);
+    const code = String(body.code || ''), verifier = String(body.codeVerifier || '');
+    const grant = nativeAuthCodes.get(code);
+    nativeAuthCodes.delete(code);
+    if (!grant || grant.expires < Date.now()) return json(res, 400, { error: 'native sign-in code is invalid or expired' });
+    if (verifier.length < 43 || verifier.length > 128 || crypto.createHash('sha256').update(verifier).digest('base64url') !== grant.verifierChallenge) return json(res, 401, { error: 'native sign-in verifier did not match' });
+    const user = db.users.find(u => u.id === grant.userId);
+    if (!user || user.disabled) return json(res, 403, { error: 'this account is unavailable' });
+    json(res, 200, { user: publicUser(user), sessionToken: makeSession(user), expiresIn: SESSION_DAYS * 86400 });
+  },
+
+  'POST /api/auth/password/reset': async (req, res) => {
+    if (!limitAuth(req, res, 'password-reset', 5, 15 * 60 * 1000)) return;
+    const body = await readBody(req);
+    const rawCode = String(body.code || '');
+    const codeHash = crypto.createHash('sha256').update(rawCode).digest('hex');
+    const reset = db.passwordResets.find(r => r.codeHash === codeHash && r.expires > Date.now());
+    if (!reset) return json(res, 400, { error: 'reset code is invalid or expired' });
+    if (!passwordOk(body.newPassword)) return json(res, 400, { error: 'new password must be 12–128 characters' });
+    const credential = db.passwords.find(p => p.userId === reset.userId);
+    const user = db.users.find(u => u.id === reset.userId);
+    if (!credential || !user || user.disabled) return json(res, 400, { error: 'password reset is unavailable for this profile' });
+    credential.hash = await hashPassword(body.newPassword, { algorithm: Algorithm.Argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+    user.sv = sessionVersion(user) + 1;
+    db.passwordResets = db.passwordResets.filter(r => r !== reset);
+    saveDb();
+    json(res, 200, { ok: true });
+  },
 
   'GET /api/me': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
-    json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } });
+    json(res, 200, { user: publicUser(user) });
   },
 
   'POST /api/register/options': async (req, res) => {
@@ -321,7 +644,7 @@ const routes = {
       transports: body.credential?.response?.transports || []
     });
     saveDb();
-    json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
+    return authReply(req, res, user, body);
   },
 
   'POST /api/login/options': async (req, res) => {
@@ -360,7 +683,7 @@ const routes = {
     const user = db.users.find(u => u.id === cred.userId);
     if (!user) return json(res, 500, { error: 'user missing' });
     if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
-    json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
+    return authReply(req, res, user, body);
   },
 
   'POST /api/logout': async (req, res) => json(res, 200, { ok: true }, { 'Set-Cookie': clearCookie }),
@@ -471,6 +794,7 @@ const routes = {
       return {
         id: u.id, name: u.name, created: u.created || null,
         disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null,
+        authMethods: publicUser(u).authMethods,
         workouts: workouts.length,
         lastWorkout: last ? last.d : null,
         lastSync: S._ts || null,
@@ -489,7 +813,7 @@ const routes = {
     if (!u) return json(res, 404, { error: 'no such user' });
     const S = readState(u.id) || {};
     json(res, 200, {
-      user: { id: u.id, name: u.name, created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null },
+      user: { id: u.id, name: u.name, created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null, authMethods: publicUser(u).authMethods },
       unit: S.unit || 'kg',
       lastSync: S._ts || null,
       routines: (S.routines || []).map(r => ({ id: r.id, name: r.name, emoji: r.emoji, count: (r.ex || []).length })),
@@ -508,6 +832,20 @@ const routes = {
     if (u.disabled) presence.delete(u.id);   // drop them off "training now" at once
     saveDb();
     json(res, 200, { ok: true, id: u.id, disabled: u.disabled });
+  },
+
+  'POST /api/admin/user/password-reset': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    if (!limitAuth(req, res, 'admin-password-reset', 5, 15 * 60 * 1000)) return;
+    const body = await readBody(req);
+    const user = db.users.find(u => u.id === body.id);
+    if (!user) return json(res, 404, { error: 'no such user' });
+    if (!db.passwords.some(p => p.userId === user.id)) return json(res, 400, { error: 'this profile has no password account' });
+    const code = crypto.randomBytes(24).toString('base64url');
+    db.passwordResets = db.passwordResets.filter(r => r.userId !== user.id);
+    db.passwordResets.push({ userId: user.id, codeHash: crypto.createHash('sha256').update(code).digest('hex'), expires: Date.now() + 15 * 60 * 1000, createdBy: admin.id });
+    saveDb();
+    json(res, 200, { code, expiresIn: 900 });
   },
 
   'GET /api/admin/invites': async (req, res) => {
@@ -547,6 +885,15 @@ const routes = {
 };
 
 http.createServer(async (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && APP_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   const url = new URL(req.url, 'http://x');
   const key = req.method + ' ' + url.pathname;
   const handler = routes[key];

@@ -1,9 +1,19 @@
 {
-  "appId": "ch.duartesantos.opengym",
+  "appId": "com.adrenocromo.gym",
   "appName": "openGym",
   "webDir": "dist",
   "backgroundColor": "#0c0e12",
   "android": {
     "allowMixedContent": false
+  },
+  "plugins": {
+    "SocialLogin": {
+      "providers": {
+        "google": true,
+        "apple": true,
+        "facebook": false,
+        "twitter": false
+      }
+    }
   }
 }
