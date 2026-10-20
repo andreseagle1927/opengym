@@ -1,6 +1,6 @@
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
-import { webauthnOK, passkeyLogin, passkeyRegister, passwordLogin, passwordRegister, resetPassword, signInWithGoogle, signInWithApple, socialProviderEnabled, BIO } from '../lib/api.js'
+import { webauthnOK, passkeyLogin, passkeyRegister, passwordLogin, passwordRegister, requestPasswordReset, completePasswordReset, supabaseRecoveryCallback, signInWithGoogle, signInWithApple, socialProviderEnabled, BIO } from '../lib/api.js'
 import { hasData } from '../store/useStore.js'
 import { t } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
@@ -58,8 +58,8 @@ export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
-  const [forgot, setForgot] = useState(false)
-  const [resetCode, setResetCode] = useState('')
+  const [forgot, setForgot] = useState(supabaseRecoveryCallback())
+  const [recovering, setRecovering] = useState(supabaseRecoveryCallback())
   const [busy, setBusy] = useState(false)
   const finish = async (u, welcome = false) => {
     setUser(u)
@@ -72,14 +72,25 @@ export default function Login() {
     setBusy(true)
     try {
       if (forgot) {
-        await resetPassword({ code: resetCode, newPassword: password })
-        setForgot(false); setPassword(''); setResetCode('')
-        useUI.getState().toast(t('Password updated. Sign in with the new password.'))
+        if (recovering) {
+          const u = await completePasswordReset({ newPassword: password })
+          setRecovering(false); setForgot(false); setPassword('')
+          await finish(u)
+        } else {
+          await requestPasswordReset({ email })
+          setForgot(false)
+          useUI.getState().toast(t('If that email has an account, a password reset link is on its way.'))
+        }
         return
       }
       const u = register
         ? await passwordRegister({ name, email, password, code })
         : await passwordLogin({ email, password })
+      if (u?.needsEmailConfirmation) {
+        setRegister(false)
+        useUI.getState().toast(t('Check your email to confirm your account, then sign in.'))
+        return
+      }
       await finish(u, register)
     } catch (e) { useUI.getState().toast(e.message || t('Sign-in failed')) }
     finally { setBusy(false) }
@@ -89,6 +100,7 @@ export default function Login() {
     try {
       const options = { code: register ? code : '', name: register ? name : '' }
       const u = provider === 'google' ? await signInWithGoogle(config, options) : await signInWithApple(config, options)
+      if (!u) return
       await finish(u, register)
     } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Sign-in failed')) }
     finally { setBusy(false) }
@@ -139,16 +151,16 @@ export default function Login() {
       </>}
       <form onSubmit={passwordSubmit} style={{ display: 'grid', gap: 9, marginTop: 12 }}>
         {forgot ? <>
-          <div className="dim small">{t('Ask your OpenGym administrator for a one-time password reset code. It expires after 15 minutes.')}</div>
-          <input className="input" placeholder={t('Reset code')} autoComplete="one-time-code" value={resetCode} onChange={e => setResetCode(e.target.value)} required />
-          <input className="input" type="password" placeholder={t('New password (12 characters minimum)')} autoComplete="new-password" minLength={12} maxLength={128} value={password} onChange={e => setPassword(e.target.value)} required />
-          <Button variant="primary" disabled={busy}>{t('Reset password')}</Button>
+          {recovering
+            ? <input className="input" type="password" placeholder={t('New password (12 characters minimum)')} autoComplete="new-password" minLength={12} maxLength={128} value={password} onChange={e => setPassword(e.target.value)} required />
+            : <><div className="dim small">{t('Enter your email and we’ll send a password reset link.')}</div><input className="input" type="email" placeholder={t('Email')} autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} required /></>}
+          <Button variant="primary" disabled={busy}>{recovering ? t('Reset password') : t('Send reset link')}</Button>
         </> : <>
           {register && <input className="input" placeholder={t('Your name')} autoComplete="name" maxLength={40} value={name} onChange={e => setName(e.target.value)} required />}
           <input className="input" type="email" placeholder={t('Email')} autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} required />
           <input className="input" type="password" placeholder={register ? t('Password (12 characters minimum)') : t('Password')} autoComplete={register ? 'new-password' : 'current-password'} minLength={register ? 12 : undefined} maxLength={128} value={password} onChange={e => setPassword(e.target.value)} required />
           {register && config?.invite_only && <input className="input" placeholder={t('Invite code')} maxLength={40} value={code} onChange={e => setCode(e.target.value.toUpperCase())} required />}
-          {register && <div className="dim small">{t('Email addresses are not verified. Keep your password safe or add a passkey after signing in.')}</div>}
+          {register && <div className="dim small">{t('We’ll send a confirmation link before you can sign in.')}</div>}
           <Button variant="primary" disabled={busy}>{register ? t('Create account') : t('Sign in with email')}</Button>
         </>}
       </form>

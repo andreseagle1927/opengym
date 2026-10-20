@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { api, clearSessionToken, prepareSocialLogin } from '../lib/api.js'
+import { api, clearSessionToken, prepareSocialLogin, configureSupabase, restoreSupabaseSession, completePendingSupabaseLink, signOutSupabase } from '../lib/api.js'
 import { localTZ } from '../lib/format.js'
 import { registerCustom } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
@@ -106,6 +106,7 @@ export const useStore = create((set, get) => {
       try {
         const c = await api('/api/config')
         set({ config: c })
+        configureSupabase(c)
         try { await prepareSocialLogin(c) } catch {}
         return c
       }
@@ -140,6 +141,7 @@ export const useStore = create((set, get) => {
 
     async signOut() {
       try { await get().pushState(); await api('/api/logout', { method: 'POST', body: '{}' }) } catch (e) { /* */ }
+      try { await signOutSupabase('local') } catch (e) { /* */ }
       clearLocalSession()
     },
 
@@ -151,6 +153,7 @@ export const useStore = create((set, get) => {
     async signOutAll() {
       await get().pushState()   // never throws — stores gym_dirty and moves on when offline
       await api('/api/logout/all', { method: 'POST', body: '{}' })
+      try { await signOutSupabase('global') } catch (e) { /* OpenGym session has already been revoked */ }
       clearLocalSession()
     },
 
@@ -180,8 +183,18 @@ export const useStore = create((set, get) => {
           try {
             const me = await api('/api/me')
             get().setUser(me.user)
+            const linked = await completePendingSupabaseLink()
+            if (linked) get().setUser(linked)
             await get().pullState()
-          } catch { get().setUser(null); await clearSessionToken(); get().setGuest(false) }
+          } catch (e) {
+            if (e.status === 401) {
+              try {
+                const restored = await restoreSupabaseSession()
+                if (restored) { get().setUser(restored); await get().pullState(); set({ ready: true }); return }
+              } catch { /* stale or unconfirmed Supabase session */ }
+            }
+            get().setUser(null); await clearSessionToken(); get().setGuest(false)
+          }
         } else get().setGuest(true)
         set({ ready: true })
         return
@@ -205,6 +218,8 @@ export const useStore = create((set, get) => {
       try {
         const me = await api('/api/me')
         get().setUser(me.user)
+        const linked = await completePendingSupabaseLink()
+        if (linked) get().setUser(linked)
         await get().pullState()
         // Re-stamp the reminder's timezone on every load — keeps it correct if you're travelling,
         // without needing to revisit Settings.
@@ -213,7 +228,13 @@ export const useStore = create((set, get) => {
           get().update(s => { s.reminder = { ...s.reminder, tz } })
         }
       } catch (e) {
-        if (e.status === 401) get().setUser(null)
+        if (e.status === 401) {
+          get().setUser(null)
+          try {
+            const restored = await restoreSupabaseSession()
+            if (restored) { get().setUser(restored); await get().pullState() }
+          } catch { /* stale or unconfirmed Supabase session */ }
+        }
       }
       set({ ready: true })
     }

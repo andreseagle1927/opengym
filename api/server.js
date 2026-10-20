@@ -40,6 +40,8 @@ const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || '';
 const APPLE_WEB_CLIENT_ID = process.env.APPLE_WEB_CLIENT_ID || '';
 const APPLE_REDIRECT_URL = process.env.APPLE_REDIRECT_URL || '';
 const NATIVE_REDIRECT_URI = process.env.NATIVE_REDIRECT_URI || 'com.adrenocromo.gym://auth/callback';
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 const APP_ORIGINS = new Set([ORIGIN, 'capacitor://localhost', 'http://localhost', 'https://localhost', ...(process.env.APP_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)]);
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 const appleKeys = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
@@ -64,6 +66,7 @@ db.invites = db.invites || [];
 db.identities = db.identities || [];
 db.passwords = db.passwords || [];
 db.passwordResets = db.passwordResets || [];
+db.supabaseIdentities = db.supabaseIdentities || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
 function atomicWrite(file, content) {
@@ -230,7 +233,10 @@ function publicUser(user) {
   if (db.creds.some(c => c.userId === user.id)) methods.add('passkey');
   if (db.passwords.some(p => p.userId === user.id)) methods.add('password');
   for (const identity of db.identities.filter(i => i.userId === user.id)) methods.add(identity.provider);
-  return { id: user.id, name: user.name, admin: isAdmin(user), authMethods: [...methods] };
+  for (const identity of db.supabaseIdentities.filter(i => i.userId === user.id)) {
+    for (const provider of identity.providers || []) methods.add(provider === 'email' ? 'password' : provider);
+  }
+  return { id: user.id, name: user.name, admin: isAdmin(user), authMethods: [...methods], managedAuth: db.supabaseIdentities.some(i => i.userId === user.id) };
 }
 function authReply(req, res, user, body = {}) {
   if (body.client === 'native') {
@@ -297,6 +303,87 @@ async function finishProviderAuth(req, res, provider, body, link = false) {
     if (claims.email && claims.emailVerified) user.email = claims.email;
     db.identities.push({ provider, sub: claims.sub, userId: user.id, email: claims.email || null, emailVerified: claims.emailVerified, linkedAt: new Date().toISOString() });
   }
+  if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
+  saveDb();
+  return authReply(req, res, user, body);
+}
+
+let supabaseSettingsCache = { expires: 0, providers: {} };
+async function supabaseProviders() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return {};
+  if (supabaseSettingsCache.expires > Date.now()) return supabaseSettingsCache.providers;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/auth/v1/settings`, {
+      headers: { apikey: SUPABASE_ANON_KEY },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) throw new Error(`Supabase settings returned ${response.status}`);
+    const settings = await response.json();
+    supabaseSettingsCache = { expires: Date.now() + 60000, providers: settings.external || {} };
+    return supabaseSettingsCache.providers;
+  } catch (error) {
+    console.error('Supabase auth settings unavailable:', error.message);
+    return supabaseSettingsCache.providers;
+  }
+}
+
+async function verifiedSupabaseUser(accessToken) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw Object.assign(new Error('Supabase Auth is not configured'), { status: 503 });
+  if (typeof accessToken !== 'string' || accessToken.length < 20 || accessToken.length > 8192)
+    throw Object.assign(new Error('a valid Supabase access token is required'), { status: 400 });
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(7000)
+  });
+  if (!response.ok) throw Object.assign(new Error('Supabase session is invalid or expired'), { status: 401 });
+  const user = await response.json();
+  if (!user?.id) throw Object.assign(new Error('Supabase returned an invalid user'), { status: 401 });
+  return user;
+}
+
+function supabaseProviderNames(user) {
+  const providers = new Set([...(user.app_metadata?.providers || []), ...(user.identities || []).map(identity => identity.provider).filter(Boolean)]);
+  return [...providers].filter(provider => provider === 'email' || ['google', 'apple'].includes(provider));
+}
+
+async function finishSupabaseAuth(req, res, body, link = false) {
+  if (!limitAuth(req, res, link ? 'supabase-link' : 'supabase-exchange', 30, 5 * 60 * 1000)) return;
+  let supaUser;
+  try { supaUser = await verifiedSupabaseUser(String(body.accessToken || '')); }
+  catch (error) { return json(res, error.status || 502, { error: error.message || 'Supabase session could not be verified' }); }
+
+  const providers = supabaseProviderNames(supaUser);
+  const email = normalizeEmail(supaUser.email);
+  const verifiedEmail = !!(supaUser.email_confirmed_at || supaUser.confirmed_at);
+  let identity = db.supabaseIdentities.find(item => item.sub === String(supaUser.id));
+
+  if (link) {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'sign in before linking an account' });
+    if (identity && identity.userId !== user.id) return json(res, 409, { error: 'this Supabase account belongs to another profile' });
+    if (!identity) {
+      identity = { sub: String(supaUser.id), userId: user.id, providers, linkedAt: new Date().toISOString() };
+      db.supabaseIdentities.push(identity);
+    } else identity.providers = providers;
+    if (verifiedEmail && email && !user.email) user.email = email;
+    saveDb();
+    return json(res, 200, { user: publicUser(user) });
+  }
+
+  let user = identity ? db.users.find(item => item.id === identity.userId) : null;
+  if (identity && !user) return json(res, 500, { error: 'linked OpenGym profile is missing' });
+  if (!user) {
+    const meta = supaUser.user_metadata || {};
+    user = newUser(String(body.name || meta.full_name || meta.name || email.split('@')[0] || 'Athlete'));
+    const inviteCode = body.code || meta.invite_code || '';
+    if (!consumeInvite(inviteCode, user)) {
+      db.users = db.users.filter(item => item.id !== user.id);
+      return json(res, 403, { error: 'a valid invite code is required' });
+    }
+    if (verifiedEmail && email) user.email = email;
+    identity = { sub: String(supaUser.id), userId: user.id, providers, linkedAt: new Date().toISOString() };
+    db.supabaseIdentities.push(identity);
+  } else identity.providers = providers;
   if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
   saveDb();
   return authReply(req, res, user, body);
@@ -393,21 +480,34 @@ const routes = {
   },
 
   // Public config the login screen needs before anyone is signed in.
-  'GET /api/config': async (req, res) => json(res, 200, {
-    invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST,
-    rp_id: RP_ID,
-    password_enabled: true,
-    google_enabled: GOOGLE_CLIENT_IDS.includes(GOOGLE_WEB_CLIENT_ID) && !!GOOGLE_WEB_CLIENT_ID,
-    google_ios_enabled: GOOGLE_CLIENT_IDS.includes(GOOGLE_WEB_CLIENT_ID) && !!GOOGLE_WEB_CLIENT_ID && !!GOOGLE_IOS_CLIENT_ID,
-    apple_enabled: APPLE_CLIENT_IDS.includes(APPLE_WEB_CLIENT_ID) && !!APPLE_WEB_CLIENT_ID && !!APPLE_REDIRECT_URL,
-    apple_native_enabled: APPLE_CLIENT_IDS.includes(APPLE_IOS_CLIENT_ID) && !!APPLE_IOS_CLIENT_ID,
-    google_client_id: GOOGLE_WEB_CLIENT_ID || null,
-    google_ios_client_id: GOOGLE_IOS_CLIENT_ID || null,
-    apple_ios_client_id: APPLE_IOS_CLIENT_ID || null,
-    apple_client_id: APPLE_WEB_CLIENT_ID || null,
-    apple_redirect_url: APPLE_REDIRECT_URL || null,
-    google_redirect_url: GOOGLE_WEB_CLIENT_ID ? ORIGIN.replace(/\/$/, '') + '/' : null
-  }),
+  'GET /api/config': async (req, res) => {
+    const providers = await supabaseProviders();
+    const googleEnabled = providers.google === true;
+    const appleEnabled = providers.apple === true;
+    return json(res, 200, {
+      invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST,
+      rp_id: RP_ID,
+      password_enabled: true,
+      supabase_enabled: !!(SUPABASE_URL && SUPABASE_ANON_KEY),
+      supabase_url: SUPABASE_URL || null,
+      supabase_anon_key: SUPABASE_ANON_KEY || null,
+      google_enabled: googleEnabled,
+      google_android_enabled: googleEnabled && !!GOOGLE_WEB_CLIENT_ID,
+      google_ios_enabled: googleEnabled && !!GOOGLE_WEB_CLIENT_ID && !!GOOGLE_IOS_CLIENT_ID,
+      apple_enabled: appleEnabled,
+      apple_android_enabled: appleEnabled && !!APPLE_WEB_CLIENT_ID,
+      apple_native_enabled: appleEnabled && !!APPLE_IOS_CLIENT_ID,
+      google_client_id: GOOGLE_WEB_CLIENT_ID || null,
+      google_ios_client_id: GOOGLE_IOS_CLIENT_ID || null,
+      apple_ios_client_id: APPLE_IOS_CLIENT_ID || null,
+      apple_client_id: APPLE_WEB_CLIENT_ID || null,
+      apple_redirect_url: SUPABASE_URL ? `${SUPABASE_URL}/auth/v1/callback` : (APPLE_REDIRECT_URL || null),
+      google_redirect_url: SUPABASE_URL ? `${SUPABASE_URL}/auth/v1/callback` : null
+    });
+  },
+
+  'POST /api/auth/supabase/exchange': async (req, res) => finishSupabaseAuth(req, res, await readBody(req)),
+  'POST /api/auth/supabase/link': async (req, res) => finishSupabaseAuth(req, res, await readBody(req), true),
 
   'POST /api/auth/password/register': async (req, res) => {
     if (!limitAuth(req, res, 'password-register', 8, 60 * 60 * 1000)) return;

@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core'
+import { createClient } from '@supabase/supabase-js'
 
 // Backend + WebAuthn helpers (ported from the vanilla app).
 export const IS_APPLE = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent)
@@ -11,6 +12,64 @@ const NATIVE = MOBILE_BUILD && Capacitor.isNativePlatform()
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || (MOBILE_BUILD ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
 const TOKEN_KEY = 'opengym-session-token'
 let sessionToken = ''
+let supabaseClient = null
+let supabaseConfigKey = ''
+
+export function configureSupabase(config) {
+  if (!config?.supabase_enabled || !config.supabase_url || !config.supabase_anon_key) return null
+  const key = config.supabase_url + '\n' + config.supabase_anon_key
+  if (supabaseClient && supabaseConfigKey === key) return supabaseClient
+  supabaseConfigKey = key
+  supabaseClient = createClient(config.supabase_url, config.supabase_anon_key, {
+    auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true, flowType: 'pkce' }
+  })
+  return supabaseClient
+}
+const getSupabase = () => supabaseClient
+export const supabaseRecoveryCallback = () => new URLSearchParams(window.location.search).get('gym_action') === 'recover'
+
+async function exchangeSupabaseSession(session, options = {}) {
+  if (!session?.access_token) throw new Error('Supabase did not return a sign-in session')
+  const code = options.code ?? localStorage.getItem('opengym-auth-invite') ?? ''
+  const name = options.name ?? localStorage.getItem('opengym-auth-name') ?? ''
+  const result = await api('/api/auth/supabase/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ accessToken: session.access_token, code, name, client: authClientMode() })
+  })
+  localStorage.removeItem('opengym-auth-invite')
+  localStorage.removeItem('opengym-auth-name')
+  if (NATIVE && result.sessionToken) await saveSessionToken(result.sessionToken)
+  return result.user
+}
+
+export async function restoreSupabaseSession() {
+  const client = getSupabase()
+  if (!client || supabaseRecoveryCallback()) return null
+  const { data, error } = await client.auth.getSession()
+  if (error) throw error
+  if (!data.session) return null
+  return exchangeSupabaseSession(data.session)
+}
+
+export async function completePendingSupabaseLink() {
+  const provider = localStorage.getItem('opengym-supabase-link')
+  if (!provider || !getSupabase()) return null
+  const { data, error } = await getSupabase().auth.getSession()
+  if (error) throw error
+  if (!data.session) return null
+  const result = await api('/api/auth/supabase/link', {
+    method: 'POST',
+    body: JSON.stringify({ accessToken: data.session.access_token })
+  })
+  localStorage.removeItem('opengym-supabase-link')
+  return result.user
+}
+export async function signOutSupabase(scope = 'local') {
+  const client = getSupabase()
+  if (!client) return
+  const { error } = await client.auth.signOut({ scope })
+  if (error) throw error
+}
 
 export async function saveSessionToken(token) {
   sessionToken = token || ''
@@ -33,9 +92,17 @@ let socialInitKey = ''
 let socialInitPromise = null
 export function socialProviderEnabled(provider, config) {
   if (!config) return false
-  const iosNative = NATIVE && Capacitor.getPlatform() === 'ios'
-  if (provider === 'google') return iosNative ? !!config.google_ios_enabled : !!config.google_enabled
-  if (provider === 'apple') return iosNative ? !!config.apple_native_enabled : !!config.apple_enabled
+  const platform = Capacitor.getPlatform()
+  if (provider === 'google') {
+    if (NATIVE && platform === 'ios') return !!config.google_ios_enabled
+    if (NATIVE && platform === 'android') return !!config.google_android_enabled
+    return !!config.google_enabled
+  }
+  if (provider === 'apple') {
+    if (NATIVE && platform === 'ios') return !!config.apple_native_enabled
+    if (NATIVE && platform === 'android') return !!config.apple_android_enabled
+    return !!config.apple_enabled
+  }
   return false
 }
 export async function prepareSocialLogin(config) {
@@ -126,12 +193,25 @@ async function saveAuthResponse(data) {
   return data.user
 }
 export async function passwordRegister({ name, email, password, code = '' }) {
-  const data = await api('/api/auth/password/register', { method: 'POST', body: JSON.stringify({ name, email, password, code, client: authClientMode() }) })
-  return saveAuthResponse(data)
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  const { data, error } = await client.auth.signUp({
+    email, password,
+    options: {
+      emailRedirectTo: `${window.location.origin}/?gym_action=confirm`,
+      data: { full_name: String(name || '').trim().slice(0, 40), invite_code: code }
+    }
+  })
+  if (error) throw error
+  if (!data.session) return { needsEmailConfirmation: true, email }
+  return exchangeSupabaseSession(data.session, { name, code })
 }
 export async function passwordLogin({ email, password }) {
-  const data = await api('/api/auth/password/login', { method: 'POST', body: JSON.stringify({ email, password, client: authClientMode() }) })
-  return saveAuthResponse(data)
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  const { data, error } = await client.auth.signInWithPassword({ email, password })
+  if (error) throw error
+  return exchangeSupabaseSession(data.session)
 }
 export async function providerChallenge(provider) {
   return api('/api/auth/provider/challenge', { method: 'POST', body: JSON.stringify({ provider }) })
@@ -144,43 +224,15 @@ async function appleNonce(nonce) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(nonce))
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')
 }
-async function loadAppleJS() {
-  if (window.AppleID?.auth) return
-  await new Promise((resolve, reject) => {
-    const script = document.createElement('script')
-    script.src = 'https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js'
-    script.onload = resolve; script.onerror = () => reject(new Error('Apple sign-in could not load'))
-    document.head.appendChild(script)
-  })
-}
-async function appleWebLogin(config, { code = '', name = '' } = {}) {
-  const challenge = await providerChallenge('apple')
-  await loadAppleJS()
-  window.AppleID.auth.init({
-    clientId: config.apple_client_id,
-    scope: 'name email',
-    redirectURI: config.apple_redirect_url,
-    usePopup: true,
-    nonce: await appleNonce(challenge.nonce)
-  })
-  const response = await window.AppleID.auth.signIn()
-  const idToken = response.authorization?.id_token
-  if (!idToken) throw new Error('Apple did not return an identity token')
-  const n = response.user?.name
-  const providerName = [n?.firstName, n?.lastName].filter(Boolean).join(' ') || name
-  const data = await api('/api/auth/provider/apple', { method: 'POST', body: JSON.stringify({ cid: challenge.cid, idToken, name: providerName, code, client: 'web' }) })
-  return saveAuthResponse(data)
-}
-async function socialLogin(provider, config, { code = '', name = '' } = {}) {
+async function nativeSupabaseLogin(provider, config, { code = '', name = '' } = {}, link = false) {
   if (!socialProviderEnabled(provider, config)) throw new Error(provider + ' sign-in is not configured for this app')
-  if (provider === 'apple' && !NATIVE) return appleWebLogin(config, { code, name })
-  const challenge = await providerChallenge(provider)
   const SocialLogin = await prepareSocialLogin(config)
   if (!SocialLogin) throw new Error('Social sign-in is not configured for this app')
-  const nonce = provider === 'apple' ? await appleNonce(challenge.nonce) : challenge.nonce
+  const nonce = crypto.randomUUID()
+  const hashedNonce = await appleNonce(nonce)
   const result = await SocialLogin.login({
     provider,
-    options: { nonce, scopes: provider === 'apple' ? ['email', 'name'] : ['profile', 'email'] }
+    options: { nonce: hashedNonce, scopes: provider === 'apple' ? ['email', 'name'] : ['profile', 'email'] }
   })
   const idToken = result.result?.idToken
   if (!idToken) throw new Error(provider + ' did not return an identity token')
@@ -188,38 +240,85 @@ async function socialLogin(provider, config, { code = '', name = '' } = {}) {
   const providerName = provider === 'apple'
     ? [profile.givenName, profile.familyName].filter(Boolean).join(' ')
     : profile.name || ''
-  const body = { cid: challenge.cid, idToken, name: name || providerName, code }
-  const data = await api('/api/auth/provider/' + provider, { method: 'POST', body: JSON.stringify({ ...body, client: authClientMode() }) })
-  return saveAuthResponse(data)
+  const { data: authData, error } = await getSupabase().auth.signInWithIdToken({ provider, token: idToken, nonce })
+  if (error) throw error
+  if (name || providerName) await getSupabase().auth.updateUser({ data: { full_name: name || providerName } })
+  if (link) {
+    const linked = await api('/api/auth/supabase/link', { method: 'POST', body: JSON.stringify({ accessToken: authData.session.access_token }) })
+    return linked.user
+  }
+  return exchangeSupabaseSession(authData.session, { name: name || providerName, code })
+}
+async function socialLogin(provider, config, { code = '', name = '' } = {}) {
+  if (!socialProviderEnabled(provider, config)) throw new Error(provider + ' sign-in is not configured for this app')
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  if (NATIVE) return nativeSupabaseLogin(provider, config, { code, name })
+  if (code) localStorage.setItem('opengym-auth-invite', code)
+  if (name) localStorage.setItem('opengym-auth-name', name)
+  const { error } = await client.auth.signInWithOAuth({
+    provider,
+    options: {
+      redirectTo: `${window.location.origin}/`,
+      scopes: provider === 'apple' ? 'name email' : 'openid email profile'
+    }
+  })
+  if (error) throw error
+  return null // The browser is redirecting to the provider.
 }
 export const signInWithGoogle = (config, options) => socialLogin('google', config, options)
 export const signInWithApple = (config, options) => socialLogin('apple', config, options)
 export async function linkProvider(provider, config) {
   if (!socialProviderEnabled(provider, config)) throw new Error(provider + ' sign-in is not configured for this app')
-  if (provider === 'apple' && !NATIVE) {
-    const challenge = await providerChallenge(provider)
-    await loadAppleJS()
-    window.AppleID.auth.init({ clientId: config.apple_client_id, scope: 'name email', redirectURI: config.apple_redirect_url, usePopup: true, nonce: await appleNonce(challenge.nonce) })
-    const response = await window.AppleID.auth.signIn()
-    const idToken = response.authorization?.id_token
-    if (!idToken) throw new Error('Apple did not return an identity token')
-    return api('/api/auth/provider/link/apple', { method: 'POST', body: JSON.stringify({ cid: challenge.cid, idToken }) })
-  }
-  const challenge = await providerChallenge(provider)
-  const SocialLogin = await prepareSocialLogin(config)
-  if (!SocialLogin) throw new Error('Social sign-in is not configured for this app')
-  const nonce = provider === 'apple' ? await appleNonce(challenge.nonce) : challenge.nonce
-  const result = await SocialLogin.login({ provider, options: { nonce, scopes: provider === 'apple' ? ['email', 'name'] : ['profile', 'email'] } })
-  const idToken = result.result?.idToken
-  if (!idToken) throw new Error(provider + ' did not return an identity token')
-  return api('/api/auth/provider/link/' + provider, { method: 'POST', body: JSON.stringify({ cid: challenge.cid, idToken }) })
+  if (NATIVE) return { user: await nativeSupabaseLogin(provider, config, {}, true) }
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  localStorage.setItem('opengym-supabase-link', provider)
+  const { error } = await client.auth.signInWithOAuth({
+    provider,
+    options: { redirectTo: `${window.location.origin}/`, scopes: provider === 'apple' ? 'name email' : 'openid email profile' }
+  })
+  if (error) { localStorage.removeItem('opengym-supabase-link'); throw error }
+  return { redirecting: true }
 }
 export async function changePassword({ password, newPassword }) {
+  const client = getSupabase()
+  if (client) {
+    const { data } = await client.auth.getSession()
+    if (data.session) {
+      const { error } = await client.auth.updateUser({ password: newPassword })
+      if (error) throw error
+      return { user: await exchangeSupabaseSession((await client.auth.getSession()).data.session) }
+    }
+  }
   const data = await api('/api/auth/password/change', { method: 'POST', body: JSON.stringify({ password, newPassword, client: authClientMode() }) })
   return saveAuthResponse(data)
 }
 export async function linkPassword({ email, password }) {
+  const client = getSupabase()
+  if (client) {
+    const { data } = await client.auth.getSession()
+    if (data.session) {
+      const { error } = await client.auth.updateUser({ email, password })
+      if (error) throw error
+      return { user: await exchangeSupabaseSession((await client.auth.getSession()).data.session) }
+    }
+  }
   return api('/api/auth/password/link', { method: 'POST', body: JSON.stringify({ email, password }) })
+}
+export async function requestPasswordReset({ email }) {
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/?gym_action=recover` })
+  if (error) throw error
+}
+export async function completePasswordReset({ newPassword }) {
+  const client = getSupabase()
+  if (!client) throw new Error('Account service is not available')
+  const { error } = await client.auth.updateUser({ password: newPassword })
+  if (error) throw error
+  const { data } = await client.auth.getSession()
+  return exchangeSupabaseSession(data.session)
 }
 export async function resetPassword({ code, newPassword }) {
   return api('/api/auth/password/reset', { method: 'POST', body: JSON.stringify({ code, newPassword }) })

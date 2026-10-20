@@ -56,13 +56,14 @@ export default function Settings() {
   const linkSocial = async provider => {
     try {
       const { user: updated } = await linkProvider(provider, config)
+      if (!updated) return // Web OAuth navigates away; boot finishes linking after the callback.
       setUser(updated)
       toast(provider === 'google' ? 'Google account linked' : 'Apple account linked')
     } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') toast(e.message || 'Could not link account') }
   }
   const addPassword = () => useUI.getState().openSheet(close => <>
     <h3>{t('Add email and password')}</h3>
-    <div className="muted small" style={{ marginBottom: 12 }}>{t('Email addresses are not verified. Forgotten passwords must be reset by an administrator.')}</div>
+    <div className="muted small" style={{ marginBottom: 12 }}>{t('We’ll verify this email before enabling email and password sign-in.')}</div>
     <form onSubmit={async ev => {
       ev.preventDefault()
       const data = new FormData(ev.currentTarget)
