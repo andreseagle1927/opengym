@@ -6,6 +6,22 @@ server {
     index index.html;
 
     # API → backend container
+    # Admin video uploads are streamed through to the API instead of being buffered as
+    # a large temporary request body by nginx.
+    location = /api/admin/exercise-video {
+        client_max_body_size 90m;
+        client_body_timeout 10m;
+        proxy_request_buffering off;
+        proxy_send_timeout 10m;
+        proxy_read_timeout 10m;
+        proxy_pass http://${BACKEND}:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location /api/ {
         proxy_pass http://${BACKEND}:${PORT};
         proxy_http_version 1.1;
@@ -13,6 +29,15 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Shared MP4s are served as static files. nginx supports byte ranges for these
+    # files by default, allowing video clients to buffer and seek on demand.
+    location ^~ /exercise-videos/ {
+        try_files $uri =404;
+        types { video/mp4 mp4; }
+        add_header Accept-Ranges bytes always;
+        add_header Cache-Control "public, max-age=0, must-revalidate" always;
     }
 
     # Apple fetches this exact path for iOS passkey association. Proxy it to the API so

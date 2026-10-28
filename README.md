@@ -168,6 +168,7 @@ All via `.env` (see `.env.example`):
 | `RP_NAME`     | Name shown in the passkey prompt                     | `openGym`               |
 | `SESSION_DAYS`| How long a sign-in lasts, in days                    | `90`                    |
 | `ADMIN_UIDS`  | User ids that get the admin dashboard (comma-separated) | *(none)*             |
+| `ADMIN_EMAILS`| Verified account emails that get the admin dashboard (comma-separated) | *(none)* |
 | `INVITE_ONLY` | Require an invite code to create a profile           | *(off)*                 |
 | `ALLOW_GUEST` | Offer "Continue without account" — set `0` to require a profile | *(on)*       |
 | `VAPID_SUBJECT` | Contact URL sent with push notifications           | your `ORIGIN`           |

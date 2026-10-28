@@ -40,7 +40,7 @@ OpenGym passkeys and its legacy password/provider API endpoints remain available
 
 ## Make the first account an administrator
 
-After creating a profile, find its ID under `users` in `/home/andres/opengym/data/db.json`. Add it to `ADMIN_UIDS` in `/home/andres/opengym/.env`, then recreate only the API container so it reads the updated environment. The Admin page can issue one-time reset codes for legacy OpenGym password accounts; Supabase-managed accounts use Supabase's email reset flow.
+To use a dedicated email account, set its verified email in `ADMIN_EMAILS` in `/home/andres/opengym/.env`. The account receives admin access after it registers and confirms that email. Alternatively, add an existing profile ID to `ADMIN_UIDS`. After changing either value, recreate only the API container so it reads the updated environment. The Admin page can issue one-time reset codes for legacy OpenGym password accounts; Supabase-managed accounts use Supabase's email reset flow.
 
 ## Passkey app/domain association
 

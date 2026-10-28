@@ -35,6 +35,7 @@ export default function Plan() {
         })}
       </div>
     </div><div>
+      <Button icon="list" onClick={() => nav('/library')} style={{ marginTop: 22 }}>{t('Exercise library')}</Button>
       <div className="row between" style={{ marginTop: 22, marginBottom: 10 }}>
         <h4 className="sec" style={{ margin: 0 }}>{t('Routines')}</h4>
         <Button size="sm" variant="tinted" icon="plus" onClick={addRoutine}>{t('New')}</Button>

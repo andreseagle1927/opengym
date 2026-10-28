@@ -9,12 +9,14 @@ import LineChart from '../components/LineChart.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
 import { glyphOf } from '../lib/glyphs.js'
+import { entriesForDate, nutritionTotal } from '../lib/food.js'
 
 // Home = what to do now + a quick glance. Deep charts & history live in Stats.
 export default function Home() {
   const nav = useNavigate()
   const S = useStore(s => s.S)
   const user = useStore(s => s.user)
+  const adminView = useStore(s => s.adminView)
   const [weekOffset, setWeekOffset] = useState(0)
 
   const today = new Date()
@@ -23,6 +25,8 @@ export default function Home() {
   const bw = lastBW(S)
   const prevBW = S.bodyweight.length > 1 ? S.bodyweight[S.bodyweight.length - 2] : null
   const delta = bw && prevBW ? bw.w - prevBW.w : null
+  const foodToday = entriesForDate(S.foodDiary || [], todayISO())
+  const foodTotal = nutritionTotal(foodToday)
 
   const monday = new Date(today); monday.setDate(today.getDate() - ((today.getDay() + 6) % 7) + weekOffset * 7)
   const doneDays = new Set(S.workouts.map(w => w.d))
@@ -43,12 +47,15 @@ export default function Home() {
   const bwPoints = S.bodyweight.slice(-30).map(b => ({ t: b.t || new Date(b.d).getTime(), y: b.w, d: b.d }))
 
   // today's session shown right under the week strip
-  const onToday = () => { if (S.active) nav('/workout'); else if (routine) startFlow(routine.id); else dayOverrideSheet(todayISO()) }
+  const onToday = () => {
+    if (adminView) { if (!routine && !S.active) dayOverrideSheet(todayISO()); return }
+    if (S.active) nav('/workout'); else if (routine) startFlow(routine.id); else dayOverrideSheet(todayISO())
+  }
 
   return <div className="narrow">
     <div className="hdr">
-      <div><h1>{user ? t('Hi {0}', user.name) : 'openGym'}</h1><div className="sub">{today.toLocaleDateString(dateLocale(), { weekday: 'long', day: 'numeric', month: 'long' })}</div></div>
-      <button className="iconbtn" onClick={() => nav('/settings')} aria-label={t('Settings')}><Icon name="gear" /></button>
+      <div><h1>{adminView?.user ? t('Hi {0}', adminView.user.name) : user ? t('Hi {0}', user.name) : 'openGym'}</h1><div className="sub">{today.toLocaleDateString(dateLocale(), { weekday: 'long', day: 'numeric', month: 'long' })}</div></div>
+      {!adminView && <button className="iconbtn" onClick={() => nav('/settings')} aria-label={t('Settings')}><Icon name="gear" /></button>}
     </div>
 
     <div className="card">
@@ -68,8 +75,8 @@ export default function Home() {
             <div className="ttl">{S.active ? t('{0} — in progress', S.active.name) : routine ? routine.name : t('Rest day')}{todayOvr && routine ? ' · ' + t('rescheduled') : ''}</div>
           </div>
         </div>
-        {S.active ? <span className="tag" style={{ color: 'var(--orange)', background: 'color-mix(in srgb,var(--orange) 16%,transparent)' }}>{t('Resume')}</span>
-          : routine ? <span className="tag acc">{t('Start')}</span>
+        {S.active ? <span className="tag" style={{ color: 'var(--orange)', background: 'color-mix(in srgb,var(--orange) 16%,transparent)' }}>{adminView ? 'Workout in progress' : t('Resume')}</span>
+          : routine ? <span className="tag acc">{adminView ? 'Planned' : t('Start')}</span>
           : <Icon name="plus" className="chev" />}
       </div>
     </div>
@@ -86,12 +93,26 @@ export default function Home() {
       </div>
     )}
 
+    <div className="card tappable" style={{ cursor: 'pointer' }} onClick={() => nav('/food')}>
+      <div className="row between" style={{ marginBottom: 10 }}>
+        <div className="row" style={{ gap: 8 }}><span className="lrow-i"><Icon name="plate" /></span><h2 style={{ margin: 0 }}>Today's food</h2></div>
+        <Icon name="chevronRight" className="chev" />
+      </div>
+      <div className="home-food-summary">
+        <div><strong>{Math.round(foodTotal.kcal)}</strong><small>kcal</small></div>
+        <div><strong>{foodTotal.protein}</strong><small>protein</small></div>
+        <div><strong>{foodTotal.carbs}</strong><small>carbs</small></div>
+        <div><strong>{foodTotal.fat}</strong><small>fat</small></div>
+      </div>
+      <div className="muted small" style={{ marginTop: 8 }}>{foodToday.length ? `${foodToday.length} ${foodToday.length === 1 ? 'item' : 'items'} logged` : 'Tap to start your food diary'}</div>
+    </div>
+
     <div className="card">
       <div className="row between" style={{ marginBottom: 6 }}>
         <h2 style={{ margin: 0 }}>{t('Body weight')}</h2>
         <div className="row" style={{ gap: 8 }}>
-          <Button size="sm" icon="target" style={S.targetW ? { color: 'var(--yellow)' } : undefined} onClick={goalSheet}>{S.targetW ? fmtNum(S.targetW) : t('Goal')}</Button>
-          <Button size="sm" icon="plus" onClick={() => bwSheet()}>{t('Log')}</Button>
+          {!adminView && <Button size="sm" icon="target" style={S.targetW ? { color: 'var(--yellow)' } : undefined} onClick={goalSheet}>{S.targetW ? fmtNum(S.targetW) : t('Goal')}</Button>}
+          {!adminView && <Button size="sm" icon="plus" onClick={() => bwSheet()}>{t('Log')}</Button>}
         </div>
       </div>
       {bw ? <>

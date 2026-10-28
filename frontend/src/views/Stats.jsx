@@ -152,10 +152,10 @@ function MuscleBalance({ S }) {
       </div>
       <Segmented className="seg-range" value={win} onChange={v => { setWin(v); setSel(null) }}
         options={[{ value: 7, label: t('Week') }, { value: 30, label: '30d' }, { value: 90, label: '90d' }, { value: 0, label: t('All') }]} />
+      <BodyMap className="tappable" load={load} body={S.body} selected={sel}
+        onMuscle={m => setSel(s => (s === m ? null : m))} />
+      <BodyMapLegend />
       {inWin.length ? <>
-        <BodyMap className="tappable" load={load} body={S.body} selected={sel}
-          onMuscle={m => setSel(s => (s === m ? null : m))} />
-        <BodyMapLegend />
         {sel && <div className="mrow" style={{ borderTop: 'var(--hair) solid var(--sep)', marginTop: 4, paddingTop: 10 }}>
           <span className="nm"><b>{t(MUSCLE_NAME[sel])}</b></span>
           <span className="v">{sets(sel) ? t('{0} sets', sets(sel)) : on ? t('no hard sets') : t('not trained')}</span>
@@ -276,6 +276,7 @@ function EffortCard({ S }) {
 export default function Stats() {
   const nav = useNavigate()
   const S = useStore(s => s.S)
+  const adminView = useStore(s => s.adminView)
   const [range, setRange] = useState(90)
   const [exId, setExId] = useState(null)
   const [exMetric, setExMetric] = useState('top')
@@ -376,7 +377,7 @@ export default function Stats() {
 
     <div className="card">
       <h2>{t('Activity — last 12 months')} <span className="dim" style={{ textTransform: 'none', letterSpacing: 0 }}>· {t('by time trained')}</span></h2>
-      <Heatmap S={S} onDay={iso => { const ws = workouts.filter(w => w.d === iso); if (ws.length === 1) workoutDetailSheet(ws[0]); else if (ws.length) calendarSheet(iso) }} />
+      <Heatmap S={S} onDay={adminView ? undefined : iso => { const ws = workouts.filter(w => w.d === iso); if (ws.length === 1) workoutDetailSheet(ws[0]); else if (ws.length) calendarSheet(iso) }} />
     </div>
 
     {workouts.length > 0 && <MuscleBalance S={S} />}
@@ -387,8 +388,8 @@ export default function Stats() {
         <div className="row between" style={{ marginBottom: 8 }}>
           <h2 style={{ margin: 0 }}>{t('Body weight')}</h2>
           <div className="row" style={{ gap: 8 }}>
-            <Button size="sm" icon="target" style={S.targetW ? { color: 'var(--yellow)' } : undefined} onClick={goalSheet}>{S.targetW ? fmtNum(S.targetW) : t('Goal')}</Button>
-            <Button size="sm" icon="plus" onClick={() => bwSheet()}>{t('Log')}</Button>
+            {!adminView && <Button size="sm" icon="target" style={S.targetW ? { color: 'var(--yellow)' } : undefined} onClick={goalSheet}>{S.targetW ? fmtNum(S.targetW) : t('Goal')}</Button>}
+            {!adminView && <Button size="sm" icon="plus" onClick={() => bwSheet()}>{t('Log')}</Button>}
           </div>
         </div>
         <Segmented className="seg-range" value={range} onChange={setRange}
@@ -430,7 +431,7 @@ export default function Stats() {
         <h4 className="sec" style={{ margin: 0 }}>{t('Recent workouts')}</h4>
         <Button size="sm" variant="ghost" trailingIcon="chevronRight" onClick={() => nav('/history')}>{t('All')} {workouts.length}</Button>
       </div>
-      <div className="list">{[...workouts].reverse().slice(0, 6).map(w => <WorkoutRow key={w.id} w={w} onClick={() => workoutDetailSheet(w)} />)}</div>
+      <div className="list">{[...workouts].reverse().slice(0, 6).map(w => <WorkoutRow key={w.id} w={w} onClick={adminView ? undefined : () => workoutDetailSheet(w)} />)}</div>
     </>}
   </>
 }

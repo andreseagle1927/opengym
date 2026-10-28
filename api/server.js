@@ -4,6 +4,8 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { Algorithm, hash as hashPassword, verify as verifyPassword } from '@node-rs/argon2';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import {
@@ -14,12 +16,15 @@ import webpush from 'web-push';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
+const VIDEO_DIR = process.env.EXERCISE_VIDEO_DIR || '/videos';
+const MAX_EXERCISE_VIDEO = 90 * 1024 * 1024;
 const RP_ID = process.env.RP_ID || 'localhost';
 const ORIGIN = process.env.ORIGIN || 'http://localhost:8080';
 const RP_NAME = process.env.RP_NAME || 'openGym';
 // Admin dashboard (issue): admins are matched by uid; INVITE_ONLY gates new signups behind a
 // code the admin generates. Both default off so a fresh self-hosted instance stays open.
 const ADMIN_UIDS = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const INVITE_ONLY = /^(1|true|yes|on)$/i.test(process.env.INVITE_ONLY || '');
 // Guest mode ("Continue without account") keeps everything in the browser and never touches this
 // server — but on an instance meant for a known set of people, an entrance nobody can walk back
@@ -50,6 +55,34 @@ const MAX_BODY = 5 * 1024 * 1024;
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
 
 fs.mkdirSync(DATA, { recursive: true });
+fs.mkdirSync(VIDEO_DIR, { recursive: true });
+
+let foodCatalog = { source: 'USDA FoodData Central SR Legacy', version: '2018-04', foods: [] };
+try { foodCatalog = JSON.parse(fs.readFileSync(new URL('./foods.json', import.meta.url), 'utf8')); }
+catch (error) { console.error('food catalog unavailable:', error.message); }
+const searchableFoods = (foodCatalog.foods || []).map(food => ({
+  food,
+  search: `${food.name || ''} ${food.category || ''}`.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+}));
+const FOOD_EXAMPLE_IDS = ['usda-173944', 'usda-171675', 'usda-171477', 'usda-173424', 'usda-168878', 'usda-170886'];
+const exampleFoods = FOOD_EXAMPLE_IDS.map(id => searchableFoods.find(item => item.food.id === id)?.food).filter(Boolean);
+
+function searchFoods(rawQuery) {
+  const query = String(rawQuery || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (query.length < 2 || query.length > 80) return null;
+  const words = query.split(/\s+/).filter(Boolean);
+  return searchableFoods
+    .filter(item => words.every(word => item.search.includes(word)))
+    .map(item => {
+      const name = item.food.name.toLowerCase();
+      let score = name === query ? 0 : name.startsWith(query) ? 1 : name.split(/[, ]+/).some(word => word.startsWith(query)) ? 2 : 3;
+      score += Math.min(name.length / 1000, .5);
+      return { ...item.food, _score: score };
+    })
+    .sort((a, b) => a._score - b._score || a.name.localeCompare(b.name))
+    .slice(0, 25)
+    .map(({ _score, ...food }) => food);
+}
 
 /* ---------- secret + db ---------- */
 const secretFile = path.join(DATA, 'secret');
@@ -67,7 +100,8 @@ db.identities = db.identities || [];
 db.passwords = db.passwords || [];
 db.passwordResets = db.passwordResets || [];
 db.supabaseIdentities = db.supabaseIdentities || [];
-const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
+const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id) ||
+  (user.emailVerified !== false && ADMIN_EMAILS.includes(String(user.email || '').trim().toLowerCase())));
 function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
 function atomicWrite(file, content) {
   const tmp = file + '.tmp';
@@ -77,6 +111,29 @@ function atomicWrite(file, content) {
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readState(uid) {
   try { return JSON.parse(fs.readFileSync(stateFile(uid), 'utf8')); } catch { return null; }
+}
+const adminAuditFile = path.join(DATA, 'admin-audit.json');
+const exerciseVideoIndexFile = path.join(DATA, 'exercise-videos.json');
+function readExerciseVideoIndex() {
+  try {
+    const index = JSON.parse(fs.readFileSync(exerciseVideoIndexFile, 'utf8'));
+    return index && typeof index === 'object' && !Array.isArray(index) ? index : {};
+  } catch { return {}; }
+}
+const validExerciseId = id => /^[A-Za-z0-9_-]{1,80}$/.test(String(id || ''));
+const exerciseVideoKey = (id, ownerId) => ownerId ? `custom:${ownerId}:${id}` : id;
+function exerciseVideoFile(filename) {
+  return /^[A-Za-z0-9_-]{1,100}\.mp4$/.test(filename) ? path.join(VIDEO_DIR, filename) : null;
+}
+function readAdminAudit() {
+  try { const rows = JSON.parse(fs.readFileSync(adminAuditFile, 'utf8')); return Array.isArray(rows) ? rows : []; }
+  catch { return []; }
+}
+function accountEmail(userId) {
+  return db.users.find(item => item.id === userId)?.email ||
+    db.passwords.find(item => item.userId === userId)?.email ||
+    db.identities.find(item => item.userId === userId && item.email)?.email ||
+    db.supabaseIdentities.find(item => item.userId === userId && item.email)?.email || null;
 }
 
 /* ---------- push notifications (Web Push / VAPID) ---------- */
@@ -473,6 +530,22 @@ setInterval(() => { for (const [k, v] of presence) if (Date.now() - v.updatedAt 
 /* ---------- routes ---------- */
 const routes = {
   'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
+  'GET /api/foods/search': async (req, res) => {
+    const query = new URL(req.url, 'http://x').searchParams.get('q');
+    const foods = searchFoods(query);
+    if (!foods) return json(res, 400, { error: 'search must contain 2–80 characters' });
+    json(res, 200, {
+      foods,
+      source: foodCatalog.source,
+      version: foodCatalog.version,
+      basis: foodCatalog.basis || 'Nutrients per 100 g edible portion'
+    }, { 'Cache-Control': 'public, max-age=300' });
+  },
+  'GET /api/foods/examples': async (req, res) => json(res, 200, {
+    foods: exampleFoods,
+    source: foodCatalog.source,
+    version: foodCatalog.version
+  }, { 'Cache-Control': 'public, max-age=3600' }),
 
   'GET /.well-known/apple-app-site-association': async (req, res) => {
     if (!/^[A-Z0-9]{10}$/.test(APPLE_TEAM_ID) || !APPLE_IOS_CLIENT_ID) return json(res, 404, { error: 'Apple passkey association is not configured' });
@@ -820,12 +893,131 @@ const routes = {
     if (!user) return json(res, 401, { error: 'not signed in' });
     const body = await readBody(req);
     if (!body.state || typeof body.state !== 'object') return json(res, 400, { error: 'state required' });
+    const file = stateFile(user.id);
+    const current = readState(user.id) || {};
+    const currentRev = Number.isSafeInteger(current._rev) ? current._rev : 0;
+    const clientRev = Number.isSafeInteger(body.state._rev) ? body.state._rev : 0;
+    if (clientRev !== currentRev) return json(res, 409, { error: 'This profile changed on another device. The latest saved data was loaded; your previous copy is available in Settings.', conflict: true, rev: currentRev });
     delete body.state.active;              // in-progress workouts stay device-local
-    atomicWrite(stateFile(user.id), JSON.stringify(body.state));
-    json(res, 200, { ok: true, ts: body.state._ts || null });
+    body.state._rev = currentRev + 1;
+    body.state._ts = Date.now();
+    atomicWrite(file, JSON.stringify(body.state));
+    json(res, 200, { ok: true, ts: body.state._ts, rev: body.state._rev });
   },
 
   'GET /api/push/public-key': async (req, res) => json(res, 200, { key: vapid.publicKey }),
+
+  // Catalogue clips are shared; custom-exercise clips are visible to their owner and Admin.
+  'GET /api/exercise-videos': async (_req, res) => {
+    const viewer = readSession(_req);
+    const videos = Object.fromEntries(Object.entries(readExerciseVideoIndex())
+      .filter(([key, entry]) => {
+        const id = entry?.exerciseId || key;
+        if (!validExerciseId(id) || !entry || !exerciseVideoFile(entry.file) || !fs.existsSync(exerciseVideoFile(entry.file))) return false;
+        return !entry.ownerId || (viewer && (isAdmin(viewer) || viewer.id === entry.ownerId));
+      })
+      .map(([key, entry]) => {
+        const id = entry.exerciseId || key;
+        return [exerciseVideoKey(id, entry.ownerId), { name: entry.name, url: `/exercise-videos/${entry.file}`, size: entry.size, updatedAt: entry.updatedAt }];
+      }));
+    json(res, 200, { videos }, { 'Cache-Control': 'no-store' });
+  },
+
+  'PUT /api/admin/exercise-video': async (req, res) => {
+    const actor = readSession(req);
+    if (!actor) return json(res, 401, { error: 'not signed in' });
+    const admin = isAdmin(actor);
+    const id = String(req.headers['x-exercise-id'] || '');
+    let requestedName;
+    try { requestedName = decodeURIComponent(String(req.headers['x-exercise-name'] || '')).slice(0, 160); }
+    catch { return json(res, 400, { error: 'valid exercise name required' }); }
+    if (!validExerciseId(id) || !requestedName.trim()) return json(res, 400, { error: 'valid exercise id and name required' });
+    const requestedOwnerId = String(req.headers['x-exercise-owner'] || '');
+    let ownerId = null;
+    let name = requestedName;
+    if (requestedOwnerId || !admin) {
+      ownerId = requestedOwnerId || actor.id;
+      if (!admin && (ownerId !== actor.id || !id.startsWith('c'))) return json(res, 403, { error: 'you can only upload videos for your own custom exercises' });
+      if (!db.users.some(user => user.id === ownerId)) return json(res, 404, { error: 'exercise owner not found' });
+      const ownerState = readState(ownerId) || {};
+      const custom = (ownerState.customEx || []).find(exercise => exercise.id === id && exercise.custom);
+      if (!custom) return json(res, 404, { error: 'save this custom exercise before uploading its video' });
+      name = String(custom.n || requestedName).slice(0, 160);
+    }
+    const indexKey = exerciseVideoKey(id, ownerId);
+    if (!/^video\/mp4(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) return json(res, 415, { error: 'Upload an MP4 video.' });
+    const previous = readExerciseVideoIndex();
+    const previousEntry = previous[indexKey];
+    const filename = `${id}-${crypto.randomBytes(8).toString('hex')}.mp4`;
+    const tmp = path.join(VIDEO_DIR, `.${filename}.upload`);
+    let size = 0;
+    let prefix = Buffer.alloc(0);
+    let checkedType = false;
+    let validationError = null;
+    const validate = new Transform({ transform(chunk, _encoding, callback) {
+      if (validationError) return callback();
+      size += chunk.length;
+      if (size > MAX_EXERCISE_VIDEO) {
+        validationError = Object.assign(new Error('Video exceeds the 90 MB upload limit.'), { status: 413 });
+        return callback();
+      }
+      if (!checkedType) {
+        prefix = Buffer.concat([prefix, chunk.subarray(0, 12 - prefix.length)]);
+        if (prefix.length >= 12) {
+          checkedType = true;
+          if (prefix.toString('ascii', 4, 8) !== 'ftyp') {
+            validationError = Object.assign(new Error('The uploaded file is not a valid MP4 video.'), { status: 415 });
+            return callback();
+          }
+        }
+      }
+      callback(null, chunk);
+    }, flush(callback) {
+      if (!validationError && (!checkedType || size === 0)) validationError = Object.assign(new Error('The uploaded file is not a valid MP4 video.'), { status: 415 });
+      callback();
+    }});
+    try {
+      await pipeline(req, validate, fs.createWriteStream(tmp, { flags: 'wx', mode: 0o640 }));
+      if (validationError) throw validationError;
+      fs.renameSync(tmp, path.join(VIDEO_DIR, filename));
+      const videos = { ...previous, [indexKey]: { exerciseId: id, ...(ownerId ? { ownerId } : {}), name: name.trim(), file: filename, size, updatedAt: new Date().toISOString() } };
+      atomicWrite(exerciseVideoIndexFile, JSON.stringify(videos, null, 2));
+      if (previousEntry?.file && previousEntry.file !== filename) {
+        const oldFile = exerciseVideoFile(previousEntry.file);
+        if (oldFile) fs.rmSync(oldFile, { force: true });
+      }
+      json(res, 200, { ok: true, id, video: videos[indexKey] });
+    } catch (error) {
+      fs.rmSync(tmp, { force: true });
+      if (!res.headersSent) json(res, error.status || 400, { error: error.message || 'Could not save video.' });
+    }
+  },
+
+  'DELETE /api/admin/exercise-video': async (req, res) => {
+    const actor = readSession(req);
+    if (!actor) return json(res, 401, { error: 'not signed in' });
+    const admin = isAdmin(actor);
+    const params = new URL(req.url, 'http://x').searchParams;
+    const id = params.get('id') || '';
+    if (!validExerciseId(id)) return json(res, 400, { error: 'valid exercise id required' });
+    const requestedOwnerId = params.get('ownerId') || '';
+    let ownerId = null;
+    if (requestedOwnerId || !admin) {
+      ownerId = requestedOwnerId || actor.id;
+      if (!admin && (ownerId !== actor.id || !id.startsWith('c'))) return json(res, 403, { error: 'you can only remove videos from your own custom exercises' });
+    }
+    const videos = readExerciseVideoIndex();
+    const indexKey = exerciseVideoKey(id, ownerId);
+    const entry = videos[indexKey];
+    if (!entry) return json(res, 404, { error: 'no video for this exercise' });
+    if (entry.ownerId && !admin && entry.ownerId !== actor.id) return json(res, 403, { error: 'forbidden' });
+    if (!entry.ownerId && !admin) return json(res, 403, { error: 'forbidden' });
+    delete videos[indexKey];
+    atomicWrite(exerciseVideoIndexFile, JSON.stringify(videos, null, 2));
+    const file = exerciseVideoFile(entry.file);
+    if (file) fs.rmSync(file, { force: true });
+    json(res, 200, { ok: true });
+  },
 
   'POST /api/push/subscribe': async (req, res) => {
     const user = readSession(req);
@@ -898,7 +1090,7 @@ const routes = {
       const workouts = S.workouts || [];
       const last = workouts[workouts.length - 1];
       return {
-        id: u.id, name: u.name, created: u.created || null,
+        id: u.id, name: u.name, email: accountEmail(u.id), created: u.created || null,
         disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null,
         authMethods: publicUser(u).authMethods,
         workouts: workouts.length,
@@ -918,14 +1110,41 @@ const routes = {
     const u = db.users.find(x => x.id === id);
     if (!u) return json(res, 404, { error: 'no such user' });
     const S = readState(u.id) || {};
+    const history = readAdminAudit().filter(row => row.targetUserId === u.id).slice(-30).reverse();
     json(res, 200, {
-      user: { id: u.id, name: u.name, created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null, authMethods: publicUser(u).authMethods },
+      user: { id: u.id, name: u.name, email: accountEmail(u.id), created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null, authMethods: publicUser(u).authMethods },
       unit: S.unit || 'kg',
       lastSync: S._ts || null,
+      rev: Number.isSafeInteger(S._rev) ? S._rev : 0,
       routines: (S.routines || []).map(r => ({ id: r.id, name: r.name, emoji: r.emoji, count: (r.ex || []).length })),
       bodyweight: S.bodyweight || [],
-      workouts: (S.workouts || []).slice().reverse()   // newest first for display
+      workouts: (S.workouts || []).slice().reverse(),   // newest first for display
+      state: S,
+      audit: history
     });
+  },
+
+  'PUT /api/admin/user/data': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const target = db.users.find(user => user.id === String(body.id || ''));
+    if (!target) return json(res, 404, { error: 'no such user' });
+    if (!body.state || typeof body.state !== 'object' || Array.isArray(body.state)) return json(res, 400, { error: 'state object required' });
+    const file = stateFile(target.id);
+    const current = readState(target.id) || {};
+    const currentRev = Number.isSafeInteger(current._rev) ? current._rev : 0;
+    if (body.expectedRev !== currentRev) return json(res, 409, { error: 'This profile changed after you opened it. Reload it and review the latest data before saving.', conflict: true, rev: currentRev });
+    const next = body.state;
+    delete next.active;                    // never expose or replace an in-progress workout
+    next._rev = currentRev + 1;
+    next._ts = Date.now();
+    const changed = [...new Set([...Object.keys(current), ...Object.keys(next)])]
+      .filter(key => key !== '_rev' && key !== '_ts' && JSON.stringify(current[key]) !== JSON.stringify(next[key]));
+    atomicWrite(file, JSON.stringify(next));
+    const audit = readAdminAudit();
+    audit.push({ actorId: admin.id, actorName: admin.name, targetUserId: target.id, targetName: target.name, changed, at: new Date().toISOString() });
+    atomicWrite(adminAuditFile, JSON.stringify(audit.slice(-5000)));
+    json(res, 200, { ok: true, rev: next._rev, lastSync: next._ts, changed });
   },
 
   'POST /api/admin/user/disable': async (req, res) => {
@@ -995,7 +1214,7 @@ http.createServer(async (req, res) => {
   if (origin && APP_ORIGINS.has(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Exercise-Id, X-Exercise-Name, X-Exercise-Owner');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Vary', 'Origin');
   }

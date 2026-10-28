@@ -94,16 +94,21 @@ If you'd rather control who gets in, three optional settings in `.env` turn that
 
 ```bash
 ADMIN_UIDS=youruserid      # comma-separated; these users get the admin dashboard
+ADMIN_EMAILS=admin@example.com # verified account email; useful for a dedicated admin profile
 INVITE_ONLY=1              # new profiles need an invite code
 ALLOW_GUEST=0              # remove "Continue without account"
 ```
 
-Register your own passkey profile first, then find your id in `./data/db.json` under `users[].id`
-and put it in `ADMIN_UIDS`. You'll get an **Admin dashboard** link in Settings: who's training
-right now, each user's workout history and body weight, the ability to disable an account (signed
-out and locked out everywhere until you re-enable it), and — with `INVITE_ONLY=1` — generating and
-revoking invite codes. Existing accounts keep working when you switch invite-only on. Admin access
-is gated by your passkey and enforced server-side, so it needs no separate login.
+Register a dedicated email profile and confirm its email, then list it in `ADMIN_EMAILS`. Or
+register a passkey profile and put its id from `./data/db.json` (`users[].id`) in `ADMIN_UIDS`.
+You'll get an **Admin dashboard** link in Settings: registered users,
+their account details and sync status, plus each profile's routines, exercise history, food diary,
+meal plans, nutrition targets, weigh-ins, and preferences. The dashboard can edit saved profile
+data, disable accounts, and — with `INVITE_ONLY=1` — generate and revoke invite codes. Admin edits
+are recorded in `./data/admin-audit.json`. Profile saves use revisions: if a second device has
+newer data, the stale save is refused and the app keeps a recoverable local copy in Settings.
+Existing accounts keep working when you switch invite-only on. Admin access is gated by your
+passkey and enforced server-side, so it needs no separate login.
 
 `INVITE_ONLY=1` and `ALLOW_GUEST=0` answer different questions and are usually set together.
 Invite-only controls who may *create a profile*; it says nothing about the **Continue without
@@ -151,6 +156,12 @@ tar czf opengym-backup-$(date +%F).tar.gz data/
 
 That archive contains all profiles, passkeys and workout history. Restore by unpacking it back
 into the project folder. (Individual users can also export their own data as JSON from Settings.)
+
+Admin exercise videos are stored separately in `./media/exercise-videos/`, while the shared
+exercise-to-video index is stored in `./data/exercise-videos.json`. Include both directories in
+your backups if you want to preserve uploaded clips. The Admin panel accepts MP4 uploads up to
+90 MB; playback is served as static media with byte-range support so browsers and phones can
+buffer and seek without downloading a per-user copy.
 
 ## 7. Notifications
 

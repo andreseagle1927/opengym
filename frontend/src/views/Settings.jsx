@@ -19,7 +19,7 @@ export default function Settings() {
   const S = useStore(s => s.S)
   const user = useStore(s => s.user)
   const config = useStore(s => s.config)
-  const { update, replaceState, setUser, pullState, pushState, signOut, signOutAll, resetDemo } = useStore()
+  const { update, replaceState, setUser, pullState, pushState, restoreConflictSnapshot, signOut, signOutAll, resetDemo } = useStore()
   const toast = useUI(s => s.toast)
   const fileRef = useRef(null)
   const importRef = useRef(null)
@@ -230,6 +230,10 @@ export default function Settings() {
         accessory="chevron" onClick={() => importRef.current.click()} />
       <Row icon="upload" iconTint="var(--blue)" title={t('Import backup')} accessory="chevron" onClick={() => fileRef.current.click()} />
       <Row icon="download" iconTint="var(--blue)" title={t('Export backup (JSON)')} accessory="chevron" onClick={doExport} />
+      {!!localStorage.getItem('gym_conflict_v1') && <Row icon="reset" iconTint="var(--orange)" title="Restore unsynced profile copy" subtitle="Replaces the current profile with the saved copy and syncs it." accessory="chevron"
+        onClick={() => confirmSheet({ title: 'Restore your saved profile copy?', message: 'This replaces the latest synced profile data with the copy preserved on this device. Export the current profile first if you need both versions.', confirmText: 'Restore copy', danger: true, onConfirm: async () => {
+          if (restoreConflictSnapshot()) { await pushState(); toast('Saved profile copy restored and synced') }
+        } })} />}
       <Row icon="trash" iconTint="var(--red)" title={t('Reset everything')} danger onClick={() => confirmSheet({ title: t('Reset everything?'), message: t('Deletes your plan, workouts and body weight on this device. This cannot be undone.'), confirmText: t('Delete everything'), danger: true, onConfirm: () => { replaceState(JSON.parse(JSON.stringify(DEF)), true); nav('/home'); toast(t('All data reset')) } })} />
     </Section>
     <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={doImport} />

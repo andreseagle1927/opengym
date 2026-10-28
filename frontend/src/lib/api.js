@@ -142,6 +142,33 @@ export async function api(path, opts) {
   return data
 }
 
+export async function apiUpload(path, file, { headers = {}, onProgress } = {}) {
+  const token = await currentSessionToken()
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('PUT', API_BASE + path)
+    request.withCredentials = true
+    request.setRequestHeader('Content-Type', 'video/mp4')
+    Object.entries(headers).forEach(([name, value]) => request.setRequestHeader(name, value))
+    if (NATIVE && token) request.setRequestHeader('Authorization', 'Bearer ' + token)
+    request.upload.addEventListener('progress', event => {
+      if (event.lengthComputable) onProgress?.(Math.round(event.loaded * 100 / event.total))
+    })
+    request.addEventListener('load', () => {
+      let data = {}
+      try { data = JSON.parse(request.responseText || '{}') } catch {}
+      if (request.status < 200 || request.status >= 300) {
+        const error = new Error(data.error || ('HTTP ' + request.status))
+        error.status = request.status
+        reject(error)
+      } else resolve(data)
+    })
+    request.addEventListener('error', () => reject(new Error('Network error while uploading the video.')))
+    request.addEventListener('abort', () => reject(new Error('Video upload was canceled.')))
+    request.send(file)
+  })
+}
+
 const bufToB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const b64uToBuf = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)).buffer
 

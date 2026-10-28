@@ -9,12 +9,15 @@ import { t, instrFor, getLang, INSTR_LANGS } from './lib/i18n.js'
 import { nav } from './lib/nav.js'
 import { starterRoutines } from './lib/starter.js'
 import Media, { Thumb } from './components/Media.jsx'
+import { api, apiUpload } from './lib/api.js'
+import { exerciseVideoKey, loadExerciseVideos } from './lib/exercise-videos.js'
 import Stepper from './components/Stepper.jsx'
 import Icon from './components/Icon.jsx'
 import { Button, Slider, Switch, Segmented, SelectRow, Row } from './components/ui.jsx'
 import { glyphOf, GLYPH_GROUPS, DEFAULT_GLYPH } from './lib/glyphs.js'
 import BodyMap from './components/BodyMap.jsx'
-import { exerciseMuscleSnapshot, loadOfWorkouts } from './lib/muscles.js'
+import { MUSCLES, MUSCLE_NAME, exerciseMuscleSnapshot, loadOfWorkouts } from './lib/muscles.js'
+import { customExerciseMusclePatch, hasRequiredMuscleSelection, selectedMusclesForExercise } from './lib/custom-exercise-muscles.js'
 import { parseImport, mergeImport } from './lib/import-csv.js'
 import { buildPlanBundle, parsePlan, mergePlan, printPlan } from './lib/plan-share.js'
 import { estimate1RM, best1RM, is1RMRecord, REP_CAP } from './lib/onerm.js'
@@ -282,13 +285,95 @@ function OneRM({ ex }) {
   </>
 }
 
+function ExerciseVideoControl({ ex, onChanged }) {
+  const isAdmin = useStore(s => s.user?.admin)
+  const videoOwnerId = useStore(s => s.adminView?.id || s.user?.id)
+  const toast = useUI(s => s.toast)
+  const [video, setVideo] = useState(undefined)
+  const [file, setFile] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState('')
+  const fileRef = useRef(null)
+  const isVideoEligibleExercise = EXDB.some(item => item.id === ex.id) || Boolean(ex.custom)
+  const canManage = isAdmin || (Boolean(ex.custom) && Boolean(videoOwnerId))
+  const videoKey = ex.custom ? exerciseVideoKey(ex.id, videoOwnerId) : ex.id
+
+  useEffect(() => {
+    let active = true
+    loadExerciseVideos(Boolean(ex.custom)).then(index => {
+      if (active) setVideo(index[videoKey] || null)
+    }).catch(e => { if (active) { setVideo(null); setError(e.message) } })
+    return () => { active = false }
+  }, [videoKey])
+
+  if (!canManage || !isVideoEligibleExercise) return null
+
+  const refresh = async () => {
+    const index = await loadExerciseVideos(true)
+    setVideo(index[videoKey] || null)
+    onChanged()
+  }
+  const upload = async () => {
+    if (!file) return setError('Choose an MP4 video first.')
+    if (file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) return setError('Choose an MP4 video.')
+    if (file.size > 90 * 1024 * 1024) return setError('The video must be 90 MB or smaller.')
+    setBusy(true); setError(''); setProgress(0)
+    try {
+      await apiUpload('/api/admin/exercise-video', file, {
+        headers: { 'X-Exercise-Id': ex.id, 'X-Exercise-Name': encodeURIComponent(ex.n), ...(ex.custom ? { 'X-Exercise-Owner': videoOwnerId } : {}) },
+        onProgress: setProgress
+      })
+      await refresh()
+      setFile(null)
+      if (fileRef.current) fileRef.current.value = ''
+      toast(video ? 'Exercise video replaced' : 'Exercise video uploaded')
+    } catch (e) { setError(e.message || 'Could not upload this video.') }
+    finally { setBusy(false) }
+  }
+  const remove = () => confirmSheet({
+    title: 'Remove this exercise video?',
+    message: ex.custom ? `The video for ${ex.n} will be removed from this profile.` : `The shared video for ${ex.n} will be removed for everyone.`,
+    confirmText: 'Remove video', danger: true,
+    onConfirm: async () => {
+      setBusy(true); setError('')
+      try {
+        await api('/api/admin/exercise-video?id=' + encodeURIComponent(ex.id) + (ex.custom ? '&ownerId=' + encodeURIComponent(videoOwnerId) : ''), { method: 'DELETE' })
+        await refresh(); toast('Exercise video removed')
+      } catch (e) { setError(e.message || 'Could not remove this video.') }
+      finally { setBusy(false) }
+    }
+  })
+
+  return <section className="exercise-video-admin" aria-label="Exercise video controls">
+    <div className="exercise-video-admin-heading">
+      <span className="exercise-video-admin-icon"><Icon name="play" /></span>
+      <div className="grow"><strong>Exercise video</strong><small>{video ? `${ex.custom ? 'Profile video' : 'Shared video'} · ${(video.size / 1048576).toFixed(1)} MB` : video === undefined ? 'Checking video…' : ex.custom ? 'Add a video to this exercise' : 'Add a video for everyone'}</small></div>
+      <span className={'tag' + (video ? ' acc' : '')}>{video ? 'Ready' : video === undefined ? 'Checking' : 'Not added'}</span>
+    </div>
+    <div className="exercise-video-admin-actions">
+      <label className="btn tinted exercise-video-file-picker">
+        <Icon name="upload" />{file ? 'Choose another' : 'Choose MP4'}
+        <input ref={fileRef} type="file" accept="video/mp4,.mp4" aria-label="Choose exercise video MP4" onChange={event => { setFile(event.target.files?.[0] || null); setError('') }} />
+      </label>
+      <Button variant="primary" size="sm" disabled={busy || !file || video === undefined} onClick={upload} icon="upload">{busy ? 'Uploading…' : video ? 'Replace video' : 'Upload video'}</Button>
+      {video && <Button variant="ghost" size="sm" disabled={busy} icon="trash" onClick={remove}>Remove</Button>}
+    </div>
+    {file && <div className="small muted exercise-video-file-name">{file.name} · {(file.size / 1048576).toFixed(1)} MB</div>}
+    {busy && <div className="exercise-video-progress" role="status"><progress max="100" value={progress} /><span>{progress ? `Uploading video · ${progress}%` : 'Preparing upload…'}</span></div>}
+    {error && <p className="small" role="alert" style={{ color: 'var(--red)', margin: 0 }}>{error}</p>}
+  </section>
+}
+
 function ExerciseDetail({ ex, close }) {
   const st = useStore(s => s.S)
+  const [videoRefreshKey, setVideoRefreshKey] = useState(0)
   const last = lastEntryFor(st, ex.id)
   const best = bestWeightFor(st, ex.id)
   return <>
     <h3 className="capitalize">{ex.n}</h3>
-    <Media ex={ex} />
+    <Media ex={ex} videoRefreshKey={videoRefreshKey} />
+    <ExerciseVideoControl ex={ex} onChanged={() => setVideoRefreshKey(key => key + 1)} />
     <div className="row" style={{ gap: 6, flexWrap: 'wrap', margin: '10px 0' }}>
       <span className="tag acc">{t(ex.bp)}</span>
       {ex.tg && <span className="tag"><Icon name="target" />{t(ex.tg)}</span>}
@@ -348,35 +433,116 @@ function CustomExForm({ existing, prefill, onDone, close }) {
   const [n, setN] = useState(existing ? existing.n : (prefill || ''))
   const [bp, setBp] = useState(existing ? existing.bp : '')
   const [desc, setDesc] = useState(existing ? (existing.desc || '') : '')
+  const [exerciseId] = useState(() => existing?.id || 'c' + uid())
+  const [created, setCreated] = useState(Boolean(existing))
+  const [videoFile, setVideoFile] = useState(null)
+  const [video, setVideo] = useState(undefined)
+  const [videoBusy, setVideoBusy] = useState(false)
+  const [videoProgress, setVideoProgress] = useState(0)
+  const [videoError, setVideoError] = useState('')
+  const videoFileRef = useRef(null)
+  const videoOwnerId = useStore(s => s.adminView?.id || s.user?.id)
+  const canUploadVideo = Boolean(videoOwnerId)
+  const videoKey = exerciseVideoKey(exerciseId, videoOwnerId)
+  const initialMuscles = selectedMusclesForExercise(existing)
+  const [selectedMuscles, setSelectedMuscles] = useState(initialMuscles)
+  const selectedLoad = Object.fromEntries(selectedMuscles.map(muscle => [muscle, 1]))
+  const toggleMuscle = muscle => setSelectedMuscles(current => current.includes(muscle)
+    ? current.filter(item => item !== muscle)
+    : [...current, muscle])
+  useEffect(() => {
+    if (!canUploadVideo) return
+    let active = true
+    loadExerciseVideos(true).then(index => { if (active) setVideo(index[videoKey] || null) })
+      .catch(() => { if (active) setVideo(null) })
+    return () => { active = false }
+  }, [videoKey, canUploadVideo])
+  const chooseVideo = file => {
+    setVideoError('')
+    if (file && file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) {
+      setVideoFile(null); setVideoError('Choose an MP4 video.'); return
+    }
+    if (file && file.size > 90 * 1024 * 1024) {
+      setVideoFile(null); setVideoError('The video must be 90 MB or smaller.'); return
+    }
+    setVideoFile(file)
+  }
   const save = () => {
     const name = n.trim()
     if (!name) { toast(t('Give it a name')); return }
     if (!bp) { toast(t('Pick a body part')); return }
-    const dup = allExercises(S()).find(e => e.n.toLowerCase() === name.toLowerCase() && e.id !== (existing || {}).id)
+    if (!hasRequiredMuscleSelection(bp, selectedMuscles)) { toast(t('Select at least one muscle')); return }
+    if (canUploadVideo && videoError && !videoFile) return
+    const dup = allExercises(S()).find(e => e.n.toLowerCase() === name.toLowerCase() && e.id !== exerciseId)
     if (dup) { toast(t('“{0}” already exists', dup.n)); return }
     const d = desc.trim().slice(0, 1000)
-    let id = existing && existing.id
-    if (existing) update(s => { const c = (s.customEx || []).find(x => x.id === id); if (c) { c.n = name; c.bp = bp; c.desc = d } })
+    if (existing || created) update(s => {
+      const c = (s.customEx || []).find(x => x.id === exerciseId)
+      if (!c) return
+      c.n = name; c.bp = bp; c.desc = d
+      const musclePatch = customExerciseMusclePatch(existing || c, selectedMuscles, initialMuscles, bp)
+      if (musclePatch && 'muscleGroups' in musclePatch) {
+        c.muscleGroups = musclePatch.muscleGroups
+        delete c.muscleWeights; delete c.muscles; delete c.targetMuscles
+      } else if (musclePatch) c.muscleWeights = musclePatch.muscleWeights
+    })
     else {
-      id = 'c' + uid()
-      update(s => { (s.customEx = s.customEx || []).push({ id, n: name, bp, desc: d, tg: '', eq: 'custom', custom: true }) })
+      update(s => { (s.customEx = s.customEx || []).push({ id: exerciseId, n: name, bp, desc: d, tg: '', eq: 'custom', custom: true, muscleGroups: [...selectedMuscles] }) })
+      setCreated(true)
+    }
+    if (videoFile) {
+      setVideoBusy(true); setVideoProgress(0); setVideoError('')
+      ;(async () => {
+        const saved = await useStore.getState().pushState()
+        if (saved === false) throw new Error('Exercise could not be synced. Check your connection, then save again.')
+        await apiUpload('/api/admin/exercise-video', videoFile, {
+          headers: { 'X-Exercise-Id': exerciseId, 'X-Exercise-Name': encodeURIComponent(name), 'X-Exercise-Owner': videoOwnerId },
+          onProgress: setVideoProgress
+        })
+        await loadExerciseVideos(true).catch(() => {})
+        toast(video ? 'Exercise video replaced' : 'Exercise video uploaded')
+        close(); onDone && onDone(EXIDX[exerciseId])
+      })().catch(error => {
+        setVideoError((existing || created ? 'Exercise saved' : 'Exercise created') + ', but the video upload failed: ' + (error.message || 'try again.'))
+      }).finally(() => setVideoBusy(false))
+      return
     }
     close()
-    toast(existing ? t('Saved') : t('“{0}” created', name))
-    onDone && onDone(EXIDX[id])
+    toast(existing || created ? t('Saved') : t('“{0}” created', name))
+    onDone && onDone(EXIDX[exerciseId])
   }
   return <>
     <h3>{existing ? t('Edit custom exercise') : t('Create your own exercise')}</h3>
-    <div className="muted small" style={{ marginBottom: 12 }}>{t('Name it and pick a body part — it behaves like any other exercise, just without an animation.')}</div>
+    <div className="muted small" style={{ marginBottom: 12 }}>{t('Name it, pick a body part, and select the muscles it works.')}</div>
     <input className="input" placeholder={t('Exercise name')} value={n} onChange={e => setN(e.target.value)} />
     <div className="chips" style={{ margin: '12px 0' }}>
       {BODYPARTS.map(b => <button key={b} className={'chip' + (bp === b ? ' on' : '')} onClick={() => setBp(b)}>{t(b)}</button>)}
     </div>
     {bp === 'cardio' && <div className="small dim row" style={{ marginBottom: 10, gap: 5 }}><Icon name="figureRun" style={{ fontSize: 13 }} />{t('Cardio exercises log time + speed instead of weight × reps.')}</div>}
+    <div className="custom-ex-muscles">
+      <div className="row between custom-ex-muscles-heading"><strong>{t('Muscles worked')}</strong><span>{t('{0} selected', selectedMuscles.length)}</span></div>
+      <BodyMap className="tappable custom-ex-bodymap" load={selectedLoad} body={S().body} selected={selectedMuscles} onMuscle={toggleMuscle} />
+      <div className="custom-ex-muscle-options" role="group" aria-label={t('Select muscles worked')}>
+        {MUSCLES.map(muscle => <button type="button" key={muscle} className={'chip' + (selectedMuscles.includes(muscle) ? ' on' : '')}
+          aria-pressed={selectedMuscles.includes(muscle)} onClick={() => toggleMuscle(muscle)}>{t(MUSCLE_NAME[muscle])}</button>)}
+      </div>
+      {!selectedMuscles.length && bp !== 'cardio' && <div className="small muted custom-ex-muscles-hint">{t('Select at least one muscle to save this exercise.')}</div>}
+    </div>
+    {canUploadVideo && <section className="custom-ex-video" aria-label="Exercise video upload">
+      <div className="custom-ex-video-heading"><span className="custom-ex-video-icon"><Icon name="play" /></span><span><strong>Exercise video</strong><small>Optional MP4 · up to 90 MB · streamed on demand</small></span></div>
+      {video && <div className="small muted custom-ex-video-current">Current video · {(video.size / 1048576).toFixed(1)} MB. Choosing a file replaces it.</div>}
+      <label className="btn tinted exercise-video-file-picker custom-ex-video-picker"><Icon name="upload" />{videoFile ? 'Choose another MP4' : video ? 'Replace video' : 'Choose MP4 video'}
+        <input ref={videoFileRef} type="file" accept="video/mp4,.mp4" aria-label="Choose exercise video MP4" disabled={videoBusy}
+          onChange={event => chooseVideo(event.target.files?.[0] || null)} />
+      </label>
+      {videoFile && <div className="small muted custom-ex-video-file">{videoFile.name} · {(videoFile.size / 1048576).toFixed(1)} MB</div>}
+      {videoBusy && <div className="exercise-video-progress" role="status"><progress max="100" value={videoProgress} /><span>{videoProgress ? `Uploading video · ${videoProgress}%` : 'Preparing upload…'}</span></div>}
+      {videoError && <p className="small" role="alert" style={{ color: 'var(--red)', margin: '6px 0 0' }}>{videoError}</p>}
+    </section>}
     <textarea className="input" rows={4} maxLength={1000} placeholder={t('Description (optional) — setup, cues, anything you want to remember')}
       value={desc} onChange={e => setDesc(e.target.value)} />
     <div style={{ height: 14 }} />
-    <Button variant="primary" onClick={save}>{existing ? t('Save') : t('Create exercise')}</Button>
+    <Button variant="primary" disabled={videoBusy} onClick={save}>{videoBusy ? 'Saving and uploading…' : existing || created ? t('Save') : t('Create exercise')}{videoFile && !videoBusy ? ' + video' : ''}</Button>
     {existing && <><div style={{ height: 8 }} /><Button variant="danger" icon="trash" onClick={() => { close(); deleteCustomEx(existing) }}>{t('Delete exercise')}</Button></>}
   </>
 }
@@ -774,6 +940,7 @@ export const workoutDetailSheet = w => ui().openSheet(close => <WorkoutDetail w=
 /* ============================ calendar ============================ */
 function Calendar({ start, close }) {
   const st = useStore(s => s.S)
+  const adminView = useStore(s => s.adminView)
   const [cur, setCur] = useState(() => { const d = start ? new Date(start) : new Date(); d.setDate(1); return d })
   const y = cur.getFullYear(), mo = cur.getMonth()
   const byDay = {}
@@ -789,7 +956,7 @@ function Calendar({ start, close }) {
     const iso = y + '-' + String(mo + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0')
     const ws = byDay[iso], effId = effectiveRoutineId(st, iso), ovr = st.dayPlan[iso] !== undefined
     const dotCls = ws ? 'done' : ovr && effId ? 'ovr' : effId ? 'plan' : ''
-    cells.push(<button key={d} className={'cal-d' + (ws ? ' has' : '') + (iso === todayISO() ? ' today' : '')} onClick={() => {
+    cells.push(<button key={d} className={'cal-d' + (ws ? ' has' : '') + (iso === todayISO() ? ' today' : '')} onClick={adminView && ws ? undefined : () => {
       if (!ws) { close(); dayOverrideSheet(iso); return }
       if (ws.length === 1) { close(); workoutDetailSheet(ws[0]); return }
       close(); ui().openSheet(c2 => <><h3>{fmtDate(iso, true)}</h3><div className="list">{ws.map(w => <WorkoutRow key={w.id} w={w} onClick={() => { c2(); workoutDetailSheet(w) }} />)}</div></>)
@@ -808,7 +975,7 @@ function Calendar({ start, close }) {
       <span><i style={{ background: 'var(--label-3)' }} />{t('Planned')}</span>
       <span><i style={{ background: 'var(--orange)' }} />{t('Rescheduled')}</span>
     </div>
-    <div className="small dim" style={{ textAlign: 'center', marginTop: 10 }}>{t('Tap a trained day for details · tap any other day to plan a session')}</div>
+    <div className="small dim" style={{ textAlign: 'center', marginTop: 10 }}>{adminView ? t('Tap a day without a workout to adjust its plan') : t('Tap a trained day for details · tap any other day to plan a session')}</div>
   </>
 }
 export const calendarSheet = start => ui().openSheet(close => <Calendar start={start} close={close} />)
