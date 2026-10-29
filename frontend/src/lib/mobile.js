@@ -6,6 +6,14 @@ import { Capacitor } from '@capacitor/core'
 
 export const MOBILE = import.meta.env.VITE_MOBILE === '1' || Capacitor.isNativePlatform()
 
+export function withTimeout(promise, ms, fallback = null) {
+  let timer
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise(resolve => { timer = setTimeout(() => resolve(fallback), ms) })
+  ]).finally(() => clearTimeout(timer))
+}
+
 const FILE = 'opengym-state.json'
 
 export async function nativeLoad() {

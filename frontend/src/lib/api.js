@@ -139,7 +139,17 @@ export async function api(path, opts) {
   const headers = Object.assign({ 'Content-Type': 'application/json' }, opts?.headers || {})
   const token = await currentSessionToken()
   if (NATIVE && token) headers.Authorization = 'Bearer ' + token
-  const r = await fetch(API_BASE + path, Object.assign({ headers, credentials: 'include' }, opts, { headers }))
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 12000)
+  let r
+  try {
+    r = await fetch(API_BASE + path, Object.assign({ credentials: 'include' }, opts, { headers, signal: controller.signal }))
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('OpenGym did not respond. Check your connection and try again.')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
   const contentType = r.headers.get('content-type') || ''
   const data = await r.json().catch(() => ({}))
   if (!contentType.toLowerCase().includes('application/json')) {

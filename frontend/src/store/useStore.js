@@ -4,7 +4,7 @@ import { localTZ } from '../lib/format.js'
 import { registerCustom } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
 import { guestAllowed } from '../lib/guest.js'
-import { MOBILE, nativeLoad, nativeSave, syncReminder } from '../lib/mobile.js'
+import { MOBILE, nativeLoad, nativeSave, syncReminder, withTimeout } from '../lib/mobile.js'
 
 const KEY = 'gym_state_v1'
 const ADMIN_VIEW_KEY = 'gym_admin_view_id'
@@ -356,35 +356,41 @@ export const useStore = create((set, get) => {
       // Restore the durable native copy first. When the self-hosted API is reachable, use the
       // same account/sync flow as the web app; if it is offline, keep the app usable locally.
       if (MOBILE) {
-        const saved = await nativeLoad()
-        const S = get().S
-        if (saved && (!hasData(S) || (saved._ts || 0) >= (S._ts || 0))) {
-          persist(Object.assign(clone(DEF), saved), false)
-        } else if (hasData(S)) {
-          nativeSave(S)   // first run after an update from a file-less version: seed the mirror
-        }
-        syncReminder(get().S)
-        const cfg = await get().loadConfig()
-        if (cfg) {
-          try {
-            const me = await api('/api/me')
-            get().setUser(me.user)
-            const linked = await completePendingSupabaseLink()
-            if (linked) get().setUser(linked)
-            await get().pullState()
-            const adminViewId = get().user?.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null
-            if (adminViewId) await get().enterAdminView(adminViewId)
-          } catch (e) {
-            if (e.status === 401) {
-              try {
-                const restored = await restoreSupabaseSession()
-                if (restored) { get().setUser(restored); await get().pullState(); const adminViewId = restored.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null; if (adminViewId) await get().enterAdminView(adminViewId); set({ ready: true }); return }
-              } catch { /* stale or unconfirmed Supabase session */ }
-            }
-            get().setUser(null); await clearSessionToken(); get().setGuest(false)
+        try {
+          const saved = await withTimeout(nativeLoad(), 3000)
+          const S = get().S
+          if (saved && (!hasData(S) || (saved._ts || 0) >= (S._ts || 0))) {
+            persist(Object.assign(clone(DEF), saved), false)
+          } else if (hasData(S)) {
+            nativeSave(S)   // first run after an update from a file-less version: seed the mirror
           }
-        } else get().setGuest(true)
-        set({ ready: true })
+          syncReminder(get().S)
+          const cfg = await withTimeout(get().loadConfig(), 15000)
+          if (cfg) {
+            try {
+              const me = await withTimeout(api('/api/me'), 15000)
+              if (!me?.user) throw new Error('OpenGym session could not be restored.')
+              get().setUser(me.user)
+              const linked = await withTimeout(completePendingSupabaseLink(), 8000)
+              if (linked) get().setUser(linked)
+              await withTimeout(get().pullState(), 15000)
+              const adminViewId = get().user?.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null
+              if (adminViewId) await get().enterAdminView(adminViewId)
+            } catch (e) {
+              if (e.status === 401) {
+                try {
+                  const restored = await withTimeout(restoreSupabaseSession(), 8000)
+                  if (restored) { get().setUser(restored); await get().pullState(); const adminViewId = restored.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null; if (adminViewId) await get().enterAdminView(adminViewId); return }
+                } catch { /* stale or unconfirmed Supabase session */ }
+                get().setUser(null); await clearSessionToken(); get().setGuest(false)
+              }
+            }
+          } else if (!get().user) get().setGuest(true)
+        } catch {
+          if (!get().user) get().setGuest(true)
+        } finally {
+          set({ ready: true })
+        }
         return
       }
       // Demo build (GitHub Pages): no backend at all — seed once, stay in guest mode.
