@@ -10,7 +10,7 @@ import { nav } from './lib/nav.js'
 import { starterRoutines } from './lib/starter.js'
 import Media, { Thumb } from './components/Media.jsx'
 import { api, apiUpload } from './lib/api.js'
-import { exerciseVideoKey, loadExerciseVideos } from './lib/exercise-videos.js'
+import { exerciseVideoKey, loadExerciseVideos, waitForExerciseVideoJob } from './lib/exercise-videos.js'
 import Stepper from './components/Stepper.jsx'
 import Icon from './components/Icon.jsx'
 import { Button, Slider, Switch, Segmented, SelectRow, Row } from './components/ui.jsx'
@@ -293,6 +293,7 @@ function ExerciseVideoControl({ ex, onChanged }) {
   const [file, setFile] = useState(null)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [videoStage, setVideoStage] = useState('uploading')
   const [error, setError] = useState('')
   const fileRef = useRef(null)
   const isVideoEligibleExercise = EXDB.some(item => item.id === ex.id) || Boolean(ex.custom)
@@ -315,15 +316,17 @@ function ExerciseVideoControl({ ex, onChanged }) {
     onChanged()
   }
   const upload = async () => {
-    if (!file) return setError('Choose an MP4 video first.')
-    if (file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) return setError('Choose an MP4 video.')
+    if (!file) return setError('Choose a video first.')
+    if (!file.type.startsWith('video/') && !/\.(mp4|m4v|mov|webm|mkv|avi|3gp|mpeg|mpg|ogv|flv|ts)$/i.test(file.name)) return setError('Choose a supported video file.')
     if (file.size > 90 * 1024 * 1024) return setError('The video must be 90 MB or smaller.')
-    setBusy(true); setError(''); setProgress(0)
+    setBusy(true); setError(''); setProgress(0); setVideoStage('uploading')
     try {
-      await apiUpload('/api/admin/exercise-video', file, {
+      const { jobId } = await apiUpload('/api/admin/exercise-video', file, {
         headers: { 'X-Exercise-Id': ex.id, 'X-Exercise-Name': encodeURIComponent(ex.n), ...(ex.custom ? { 'X-Exercise-Owner': videoOwnerId } : {}) },
         onProgress: setProgress
       })
+      setVideoStage('processing')
+      await waitForExerciseVideoJob(jobId)
       await refresh()
       setFile(null)
       if (fileRef.current) fileRef.current.value = ''
@@ -353,14 +356,14 @@ function ExerciseVideoControl({ ex, onChanged }) {
     </div>
     <div className="exercise-video-admin-actions">
       <label className="btn tinted exercise-video-file-picker">
-        <Icon name="upload" />{file ? 'Choose another' : 'Choose MP4'}
-        <input ref={fileRef} type="file" accept="video/mp4,.mp4" aria-label="Choose exercise video MP4" onChange={event => { setFile(event.target.files?.[0] || null); setError('') }} />
+        <Icon name="upload" />{file ? 'Choose another' : 'Choose video'}
+        <input ref={fileRef} type="file" accept="video/*" aria-label="Choose exercise video" onChange={event => { setFile(event.target.files?.[0] || null); setError('') }} />
       </label>
       <Button variant="primary" size="sm" disabled={busy || !file || video === undefined} onClick={upload} icon="upload">{busy ? 'Uploading…' : video ? 'Replace video' : 'Upload video'}</Button>
       {video && <Button variant="ghost" size="sm" disabled={busy} icon="trash" onClick={remove}>Remove</Button>}
     </div>
     {file && <div className="small muted exercise-video-file-name">{file.name} · {(file.size / 1048576).toFixed(1)} MB</div>}
-    {busy && <div className="exercise-video-progress" role="status"><progress max="100" value={progress} /><span>{progress ? `Uploading video · ${progress}%` : 'Preparing upload…'}</span></div>}
+    {busy && <div className="exercise-video-progress" role="status"><progress max="100" value={videoStage === 'processing' ? 100 : progress} /><span>{videoStage === 'processing' ? 'Processing video for playback…' : progress ? `Uploading video · ${progress}%` : 'Preparing upload…'}</span></div>}
     {error && <p className="small" role="alert" style={{ color: 'var(--red)', margin: 0 }}>{error}</p>}
   </section>
 }
@@ -439,6 +442,7 @@ function CustomExForm({ existing, prefill, onDone, close }) {
   const [video, setVideo] = useState(undefined)
   const [videoBusy, setVideoBusy] = useState(false)
   const [videoProgress, setVideoProgress] = useState(0)
+  const [videoStage, setVideoStage] = useState('uploading')
   const [videoError, setVideoError] = useState('')
   const videoFileRef = useRef(null)
   const videoOwnerId = useStore(s => s.adminView?.id || s.user?.id)
@@ -459,8 +463,8 @@ function CustomExForm({ existing, prefill, onDone, close }) {
   }, [videoKey, canUploadVideo])
   const chooseVideo = file => {
     setVideoError('')
-    if (file && file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) {
-      setVideoFile(null); setVideoError('Choose an MP4 video.'); return
+    if (file && !file.type.startsWith('video/') && !/\.(mp4|m4v|mov|webm|mkv|avi|3gp|mpeg|mpg|ogv|flv|ts)$/i.test(file.name)) {
+      setVideoFile(null); setVideoError('Choose a supported video file.'); return
     }
     if (file && file.size > 90 * 1024 * 1024) {
       setVideoFile(null); setVideoError('The video must be 90 MB or smaller.'); return
@@ -491,14 +495,16 @@ function CustomExForm({ existing, prefill, onDone, close }) {
       setCreated(true)
     }
     if (videoFile) {
-      setVideoBusy(true); setVideoProgress(0); setVideoError('')
+      setVideoBusy(true); setVideoProgress(0); setVideoError(''); setVideoStage('uploading')
       ;(async () => {
         const saved = await useStore.getState().pushState()
         if (saved === false) throw new Error('Exercise could not be synced. Check your connection, then save again.')
-        await apiUpload('/api/admin/exercise-video', videoFile, {
+        const { jobId } = await apiUpload('/api/admin/exercise-video', videoFile, {
           headers: { 'X-Exercise-Id': exerciseId, 'X-Exercise-Name': encodeURIComponent(name), 'X-Exercise-Owner': videoOwnerId },
           onProgress: setVideoProgress
         })
+        setVideoStage('processing')
+        await waitForExerciseVideoJob(jobId)
         await loadExerciseVideos(true).catch(() => {})
         toast(video ? 'Exercise video replaced' : 'Exercise video uploaded')
         close(); onDone && onDone(EXIDX[exerciseId])
@@ -529,14 +535,14 @@ function CustomExForm({ existing, prefill, onDone, close }) {
       {!selectedMuscles.length && bp !== 'cardio' && <div className="small muted custom-ex-muscles-hint">{t('Select at least one muscle to save this exercise.')}</div>}
     </div>
     {canUploadVideo && <section className="custom-ex-video" aria-label="Exercise video upload">
-      <div className="custom-ex-video-heading"><span className="custom-ex-video-icon"><Icon name="play" /></span><span><strong>Exercise video</strong><small>Optional MP4 · up to 90 MB · streamed on demand</small></span></div>
+      <div className="custom-ex-video-heading"><span className="custom-ex-video-icon"><Icon name="play" /></span><span><strong>Exercise video</strong><small>Optional video · converted for playback · up to 90 MB</small></span></div>
       {video && <div className="small muted custom-ex-video-current">Current video · {(video.size / 1048576).toFixed(1)} MB. Choosing a file replaces it.</div>}
-      <label className="btn tinted exercise-video-file-picker custom-ex-video-picker"><Icon name="upload" />{videoFile ? 'Choose another MP4' : video ? 'Replace video' : 'Choose MP4 video'}
-        <input ref={videoFileRef} type="file" accept="video/mp4,.mp4" aria-label="Choose exercise video MP4" disabled={videoBusy}
+      <label className="btn tinted exercise-video-file-picker custom-ex-video-picker"><Icon name="upload" />{videoFile ? 'Choose another video' : video ? 'Replace video' : 'Choose video'}
+        <input ref={videoFileRef} type="file" accept="video/*" aria-label="Choose exercise video" disabled={videoBusy}
           onChange={event => chooseVideo(event.target.files?.[0] || null)} />
       </label>
       {videoFile && <div className="small muted custom-ex-video-file">{videoFile.name} · {(videoFile.size / 1048576).toFixed(1)} MB</div>}
-      {videoBusy && <div className="exercise-video-progress" role="status"><progress max="100" value={videoProgress} /><span>{videoProgress ? `Uploading video · ${videoProgress}%` : 'Preparing upload…'}</span></div>}
+      {videoBusy && <div className="exercise-video-progress" role="status"><progress max="100" value={videoStage === 'processing' ? 100 : videoProgress} /><span>{videoStage === 'processing' ? 'Processing video for playback…' : videoProgress ? `Uploading video · ${videoProgress}%` : 'Preparing upload…'}</span></div>}
       {videoError && <p className="small" role="alert" style={{ color: 'var(--red)', margin: '6px 0 0' }}>{videoError}</p>}
     </section>}
     <textarea className="input" rows={4} maxLength={1000} placeholder={t('Description (optional) — setup, cues, anything you want to remember')}

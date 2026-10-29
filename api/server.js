@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Algorithm, hash as hashPassword, verify as verifyPassword } from '@node-rs/argon2';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import {
@@ -18,6 +20,7 @@ const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
 const VIDEO_DIR = process.env.EXERCISE_VIDEO_DIR || '/videos';
 const MAX_EXERCISE_VIDEO = 90 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 const RP_ID = process.env.RP_ID || 'localhost';
 const ORIGIN = process.env.ORIGIN || 'http://localhost:8080';
 const RP_NAME = process.env.RP_NAME || 'openGym';
@@ -114,6 +117,7 @@ function readState(uid) {
 }
 const adminAuditFile = path.join(DATA, 'admin-audit.json');
 const exerciseVideoIndexFile = path.join(DATA, 'exercise-videos.json');
+const exerciseVideoJobsFile = path.join(DATA, 'exercise-video-jobs.json');
 function readExerciseVideoIndex() {
   try {
     const index = JSON.parse(fs.readFileSync(exerciseVideoIndexFile, 'utf8'));
@@ -125,6 +129,105 @@ const exerciseVideoKey = (id, ownerId) => ownerId ? `custom:${ownerId}:${id}` : 
 function exerciseVideoFile(filename) {
   return /^[A-Za-z0-9_-]{1,100}\.mp4$/.test(filename) ? path.join(VIDEO_DIR, filename) : null;
 }
+const videoJobs = (() => {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(exerciseVideoJobsFile, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+})();
+const videoQueue = [];
+let processingVideoQueue = false;
+function saveVideoJobs() { atomicWrite(exerciseVideoJobsFile, JSON.stringify(videoJobs, null, 2)); }
+function publicVideoJob(job) {
+  return { id: job.id, status: job.status, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
+}
+function setVideoJob(job, patch) {
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  saveVideoJobs();
+}
+async function probeVideo(file) {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v', 'error', '-show_entries', 'stream=codec_type,color_transfer', '-show_entries', 'format=duration', '-of', 'json', file
+  ], { timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+  const info = JSON.parse(stdout);
+  const video = (info.streams || []).find(stream => stream.codec_type === 'video');
+  const duration = Number(info.format?.duration);
+  if (!video || !Number.isFinite(duration) || duration <= 0) throw new Error('The file does not contain a playable video track.');
+  return { hdr: ['smpte2084', 'arib-std-b67'].includes(video.color_transfer) };
+}
+async function transcodeVideo(source, output, hdr) {
+  const normalize = 'scale=w=min(1920\\,iw):h=min(1080\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30,format=yuv420p';
+  const hdrFilter = 'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable,zscale=t=bt709:m=bt709:r=tv,' + normalize;
+  const args = ['-hide_banner', '-nostdin', '-y', '-i', source, '-map', '0:v:0', '-map', '0:a:0?', '-vf', hdr ? hdrFilter : normalize,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+    '-movflags', '+faststart', '-f', 'mp4', output];
+  try {
+    await execFileAsync('ffmpeg', args, { timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    if (!(hdr && /No such filter|filter not found/i.test(error.stderr || ''))) throw error;
+    await execFileAsync('ffmpeg', [...args.slice(0, args.indexOf('-vf')), '-vf', normalize, ...args.slice(args.indexOf('-vf') + 2)],
+      { timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  }
+}
+async function processVideoJob(job) {
+  const source = path.join(VIDEO_DIR, job.sourceFile);
+  const outputTmp = path.join(VIDEO_DIR, `.${job.outputFile}.processing`);
+  try {
+    setVideoJob(job, { status: 'processing', error: null });
+    const { hdr } = await probeVideo(source);
+    await transcodeVideo(source, outputTmp, hdr);
+    const outputStat = fs.statSync(outputTmp);
+    if (outputStat.size < 1024) throw new Error('The converted video is empty or incomplete.');
+    const outputProbe = await probeVideo(outputTmp);
+    if (!outputProbe) throw new Error('The converted video failed validation.');
+    fs.renameSync(outputTmp, path.join(VIDEO_DIR, job.outputFile));
+    const videos = readExerciseVideoIndex();
+    const previousEntry = videos[job.indexKey];
+    videos[job.indexKey] = { exerciseId: job.exerciseId, ...(job.ownerId ? { ownerId: job.ownerId } : {}), name: job.name, file: job.outputFile, size: outputStat.size, updatedAt: new Date().toISOString() };
+    atomicWrite(exerciseVideoIndexFile, JSON.stringify(videos, null, 2));
+    if (previousEntry?.file && previousEntry.file !== job.outputFile) {
+      const oldFile = exerciseVideoFile(previousEntry.file);
+      if (oldFile) fs.rmSync(oldFile, { force: true });
+    }
+    fs.rmSync(source, { force: true });
+    setVideoJob(job, { status: 'ready', sourceFile: null, error: null });
+  } catch (error) {
+    fs.rmSync(outputTmp, { force: true });
+    fs.rmSync(source, { force: true });
+    setVideoJob(job, { status: 'failed', sourceFile: null, error: String(error.stderr || error.message || 'Video conversion failed.').slice(-1200) });
+  }
+}
+async function pumpVideoQueue() {
+  if (processingVideoQueue) return;
+  processingVideoQueue = true;
+  try {
+    while (videoQueue.length) {
+      const job = videoJobs[videoQueue.shift()];
+      if (job) await processVideoJob(job);
+    }
+  } finally { processingVideoQueue = false; }
+}
+function enqueueVideoJob(job) {
+  const completed = Object.values(videoJobs).filter(item => ['ready', 'failed'].includes(item.status)).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+  while (Object.keys(videoJobs).length >= 100 && completed.length) delete videoJobs[completed.shift().id];
+  videoJobs[job.id] = job;
+  videoQueue.push(job.id);
+  saveVideoJobs();
+  void pumpVideoQueue();
+}
+for (const job of Object.values(videoJobs)) {
+  if (job.status === 'queued' || job.status === 'processing') {
+    if (job.sourceFile && fs.existsSync(path.join(VIDEO_DIR, job.sourceFile))) {
+      job.status = 'queued'; videoQueue.push(job.id);
+    } else if (readExerciseVideoIndex()[job.indexKey]?.file === job.outputFile && fs.existsSync(path.join(VIDEO_DIR, job.outputFile))) {
+      job.status = 'ready'; job.sourceFile = null; job.error = null;
+    } else {
+      job.status = 'failed'; job.sourceFile = null; job.error = 'The uploaded file was missing after the server restarted.';
+    }
+  }
+}
+saveVideoJobs();
+if (videoQueue.length) void pumpVideoQueue();
 function readAdminAudit() {
   try { const rows = JSON.parse(fs.readFileSync(adminAuditFile, 'utf8')); return Array.isArray(rows) ? rows : []; }
   catch { return []; }
@@ -923,6 +1026,16 @@ const routes = {
     json(res, 200, { videos }, { 'Cache-Control': 'no-store' });
   },
 
+  'GET /api/admin/exercise-video/job': async (req, res) => {
+    const actor = readSession(req);
+    if (!actor) return json(res, 401, { error: 'not signed in' });
+    const id = new URL(req.url, 'http://x').searchParams.get('id') || '';
+    const job = videoJobs[id];
+    if (!job) return json(res, 404, { error: 'video job not found' });
+    if (job.actorId !== actor.id && !isAdmin(actor)) return json(res, 403, { error: 'forbidden' });
+    json(res, 200, publicVideoJob(job), { 'Cache-Control': 'no-store' });
+  },
+
   'PUT /api/admin/exercise-video': async (req, res) => {
     const actor = readSession(req);
     if (!actor) return json(res, 401, { error: 'not signed in' });
@@ -945,14 +1058,18 @@ const routes = {
       name = String(custom.n || requestedName).slice(0, 160);
     }
     const indexKey = exerciseVideoKey(id, ownerId);
-    if (!/^video\/mp4(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) return json(res, 415, { error: 'Upload an MP4 video.' });
-    const previous = readExerciseVideoIndex();
-    const previousEntry = previous[indexKey];
-    const filename = `${id}-${crypto.randomBytes(8).toString('hex')}.mp4`;
-    const tmp = path.join(VIDEO_DIR, `.${filename}.upload`);
+    const contentType = String(req.headers['content-type'] || '');
+    if (!/^video\//i.test(contentType) && !/^application\/octet-stream(?:\s*;|$)/i.test(contentType)) return json(res, 415, { error: 'Choose a video file.' });
+    if (videoQueue.length >= 20) return json(res, 503, { error: 'The video processing queue is full. Try again in a few minutes.' });
+    if (Object.values(videoJobs).some(job => job.indexKey === indexKey && ['queued', 'processing'].includes(job.status))) {
+      return json(res, 409, { error: 'A video for this exercise is already being processed.' });
+    }
+    const jobId = crypto.randomUUID();
+    const sourceFile = `${id}-${crypto.randomBytes(8).toString('hex')}.source`;
+    const outputFile = `${id}-${crypto.randomBytes(8).toString('hex')}.mp4`;
+    const tmp = path.join(VIDEO_DIR, `.${sourceFile}.upload`);
     let size = 0;
     let prefix = Buffer.alloc(0);
-    let checkedType = false;
     let validationError = null;
     const validate = new Transform({ transform(chunk, _encoding, callback) {
       if (validationError) return callback();
@@ -961,32 +1078,18 @@ const routes = {
         validationError = Object.assign(new Error('Video exceeds the 90 MB upload limit.'), { status: 413 });
         return callback();
       }
-      if (!checkedType) {
-        prefix = Buffer.concat([prefix, chunk.subarray(0, 12 - prefix.length)]);
-        if (prefix.length >= 12) {
-          checkedType = true;
-          if (prefix.toString('ascii', 4, 8) !== 'ftyp') {
-            validationError = Object.assign(new Error('The uploaded file is not a valid MP4 video.'), { status: 415 });
-            return callback();
-          }
-        }
-      }
+      if (prefix.length < 64) prefix = Buffer.concat([prefix, chunk.subarray(0, 64 - prefix.length)]);
       callback(null, chunk);
-    }, flush(callback) {
-      if (!validationError && (!checkedType || size === 0)) validationError = Object.assign(new Error('The uploaded file is not a valid MP4 video.'), { status: 415 });
-      callback();
     }});
     try {
       await pipeline(req, validate, fs.createWriteStream(tmp, { flags: 'wx', mode: 0o640 }));
       if (validationError) throw validationError;
-      fs.renameSync(tmp, path.join(VIDEO_DIR, filename));
-      const videos = { ...previous, [indexKey]: { exerciseId: id, ...(ownerId ? { ownerId } : {}), name: name.trim(), file: filename, size, updatedAt: new Date().toISOString() } };
-      atomicWrite(exerciseVideoIndexFile, JSON.stringify(videos, null, 2));
-      if (previousEntry?.file && previousEntry.file !== filename) {
-        const oldFile = exerciseVideoFile(previousEntry.file);
-        if (oldFile) fs.rmSync(oldFile, { force: true });
-      }
-      json(res, 200, { ok: true, id, video: videos[indexKey] });
+      if (prefix.length < 12 || size < 12) throw Object.assign(new Error('The selected file is too small to be a video.'), { status: 415 });
+      fs.renameSync(tmp, path.join(VIDEO_DIR, sourceFile));
+      const job = { id: jobId, exerciseId: id, ...(ownerId ? { ownerId } : {}), actorId: actor.id, indexKey,
+        name: name.trim(), sourceFile, outputFile, status: 'queued', error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      enqueueVideoJob(job);
+      json(res, 202, { jobId, status: 'queued' });
     } catch (error) {
       fs.rmSync(tmp, { force: true });
       if (!res.headersSent) json(res, error.status || 400, { error: error.message || 'Could not save video.' });

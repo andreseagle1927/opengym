@@ -165,7 +165,7 @@ export async function apiUpload(path, file, { headers = {}, onProgress } = {}) {
     const request = new XMLHttpRequest()
     request.open('PUT', API_BASE + path)
     request.withCredentials = true
-    request.setRequestHeader('Content-Type', 'video/mp4')
+    request.setRequestHeader('Content-Type', file.type?.startsWith('video/') ? file.type : 'application/octet-stream')
     Object.entries(headers).forEach(([name, value]) => request.setRequestHeader(name, value))
     if (NATIVE && token) request.setRequestHeader('Authorization', 'Bearer ' + token)
     request.upload.addEventListener('progress', event => {

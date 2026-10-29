@@ -16,6 +16,7 @@ LABEL maintainer="Duarte Santos https://github.com/DuarteSantos8" \
     org.opencontainers.image.created=$BUILD_DATE
 
 WORKDIR /app
+RUN apk add --no-cache ffmpeg
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev && npm cache clean --force
 COPY server.js ./
