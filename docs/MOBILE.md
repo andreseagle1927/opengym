@@ -40,8 +40,13 @@ npx cap open android        # opens Android Studio → run on emulator or device
 npx cap open ios            # opens Xcode (Mac only) → set your signing team, then run
 ```
 
-`npm run build:mobile` bakes the CDN media base into the bundle and copies the web build
-into both native projects — re-run it after every web-code change before building natively.
+`npm run build:mobile` points the app at the OpenGym API and first-party image/GIF paths,
+then copies the web build into both native projects. Native runtime detection also supplies
+these server defaults if the app was built without the mobile environment flag. Re-run the
+command after every web-code change before building natively.
+
+After pulling an update, rebuild and reinstall the iOS/Android app: installed native apps
+keep a bundled copy of the web UI and do not update when the website changes.
 
 > **Heads-up:** after `build:mobile`, `frontend/dist` contains the *mobile* bundle.
 > Run a plain `npm run build` again before deploying `dist` to a server.

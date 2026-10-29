@@ -1,5 +1,6 @@
 import { EXDB } from './exercises-data.js'
 import { t } from './i18n-core.js'
+import { Capacitor } from '@capacitor/core'
 
 export { EXDB }
 
@@ -56,8 +57,10 @@ export const allExercises = st => [...(st.customEx || []), ...EXDB]
 // try_files, so it 404s rather than falling through to index.html, leaving a blank image
 // and nothing in the console.
 const ENV = import.meta.env || {}
-const IMG_BASE = ENV.VITE_IMG_BASE || '/img/'
-const GIF_BASE = ENV.VITE_GIF_BASE || '/gif/'
+const MOBILE_RUNTIME = ENV.VITE_MOBILE === '1' || Capacitor.isNativePlatform()
+const MEDIA_ORIGIN = (ENV.VITE_API_BASE_URL || (MOBILE_RUNTIME ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
+const IMG_BASE = ENV.VITE_IMG_BASE || (MOBILE_RUNTIME ? `${MEDIA_ORIGIN}/img/` : '/img/')
+const GIF_BASE = ENV.VITE_GIF_BASE || (MOBILE_RUNTIME ? `${MEDIA_ORIGIN}/gif/` : '/gif/')
 export const imgSrc = ex => IMG_BASE + ex.img
 export const gifSrc = ex => GIF_BASE + ex.gif
 

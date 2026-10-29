@@ -1,8 +1,9 @@
 import { api } from './api.js'
+import { Capacitor } from '@capacitor/core'
 
 const ENV = import.meta.env || {}
-const MOBILE_BUILD = ENV.VITE_MOBILE === '1'
-const API_BASE = (ENV.VITE_API_BASE_URL || (MOBILE_BUILD ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
+const MOBILE_RUNTIME = ENV.VITE_MOBILE === '1' || Capacitor.isNativePlatform()
+const API_BASE = (ENV.VITE_API_BASE_URL || (MOBILE_RUNTIME ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
 
 let cachedIndex = null
 let cachedAt = 0

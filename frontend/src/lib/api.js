@@ -8,8 +8,11 @@ export const BIO = IS_APPLE ? 'Face ID / Touch ID' : IS_ANDROID ? 'fingerprint o
 export const VAULT = IS_APPLE ? 'iCloud Keychain' : IS_ANDROID ? 'Google Password Manager' : 'your password manager'
 export const webauthnOK = () => !!(window.PublicKeyCredential && navigator.credentials)
 const MOBILE_BUILD = import.meta.env.VITE_MOBILE === '1'
-const NATIVE = MOBILE_BUILD && Capacitor.isNativePlatform()
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || (MOBILE_BUILD ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
+// Detect the Capacitor shell at runtime as well as at build time. A native bundle made
+// with plain `vite build` must still talk to the API instead of its local app shell.
+const NATIVE = Capacitor.isNativePlatform()
+const MOBILE_RUNTIME = MOBILE_BUILD || NATIVE
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || (MOBILE_RUNTIME ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
 const TOKEN_KEY = 'opengym-session-token'
 let sessionToken = ''
 let supabaseClient = null
@@ -137,7 +140,11 @@ export async function api(path, opts) {
   const token = await currentSessionToken()
   if (NATIVE && token) headers.Authorization = 'Bearer ' + token
   const r = await fetch(API_BASE + path, Object.assign({ headers, credentials: 'include' }, opts, { headers }))
+  const contentType = r.headers.get('content-type') || ''
   const data = await r.json().catch(() => ({}))
+  if (!contentType.toLowerCase().includes('application/json')) {
+    throw new Error('OpenGym returned an invalid response. Rebuild or update the app, then try again.')
+  }
   if (!r.ok) { const e = new Error(data.error || ('HTTP ' + r.status)); e.status = r.status; throw e }
   return data
 }
@@ -173,12 +180,18 @@ const bufToB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).repla
 const b64uToBuf = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)).buffer
 
 function toCreationOptions(o) {
+  if (!o || typeof o.challenge !== 'string' || !o.user?.id) {
+    throw new Error('Could not start passkey setup. Try again or use email and password.')
+  }
   o.challenge = b64uToBuf(o.challenge)
   o.user.id = b64uToBuf(o.user.id)
   ;(o.excludeCredentials || []).forEach(c => { c.id = b64uToBuf(c.id) })
   return o
 }
 function toRequestOptions(o) {
+  if (!o || typeof o.challenge !== 'string') {
+    throw new Error('Could not start passkey sign-in. Try again or use email and password.')
+  }
   o.challenge = b64uToBuf(o.challenge)
   ;(o.allowCredentials || []).forEach(c => { c.id = b64uToBuf(c.id) })
   return o
