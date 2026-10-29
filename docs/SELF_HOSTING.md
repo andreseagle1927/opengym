@@ -160,9 +160,11 @@ into the project folder. (Individual users can also export their own data as JSO
 Admin exercise videos are stored separately in `./media/exercise-videos/`, while the shared
 exercise-to-video index and durable conversion jobs are stored in `./data/exercise-videos.json`
 and `./data/exercise-video-jobs.json`. Include both directories in
-your backups if you want to preserve uploaded clips. The Admin panel accepts common video
-formats up to 90 MB, converts them to H.264/AAC MP4, then keeps only the playback
-copy. Playback is served as static media with byte-range support so browsers and phones can
+your backups if you want to preserve uploaded clips and their generated JPEG thumbnails. The
+thumbnail is regenerated from each uploaded clip and replaces the prior one with the video.
+The Admin panel accepts common video formats up to 90 MB, converts them to H.264/AAC MP4,
+creates a thumbnail from the converted clip, then removes the uploaded source. Playback is
+served as static media with byte-range support so browsers and phones can
 buffer and seek without downloading a per-user copy. The API image installs FFmpeg for conversion.
 
 ## 7. Notifications

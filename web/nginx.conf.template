@@ -35,7 +35,7 @@ server {
     # files by default, allowing video clients to buffer and seek on demand.
     location ^~ /exercise-videos/ {
         try_files $uri =404;
-        types { video/mp4 mp4; }
+        types { video/mp4 mp4; image/jpeg jpg jpeg; }
         add_header Accept-Ranges bytes always;
         add_header Cache-Control "public, max-age=0, must-revalidate" always;
     }

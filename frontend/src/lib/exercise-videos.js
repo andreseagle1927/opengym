@@ -43,4 +43,5 @@ export async function waitForExerciseVideoJob(jobId, onStatus) {
 }
 
 export const exerciseVideoUrl = entry => entry?.url ? new URL(entry.url, API_BASE || window.location.origin).href : ''
+export const exerciseVideoPosterUrl = entry => entry?.posterUrl ? new URL(entry.posterUrl, API_BASE || window.location.origin).href : ''
 export const exerciseVideoKey = (exerciseId, ownerId) => ownerId ? `custom:${ownerId}:${exerciseId}` : exerciseId

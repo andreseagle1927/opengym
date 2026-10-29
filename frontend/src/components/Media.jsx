@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { imgSrc, gifSrc } from '../lib/exercises.js'
-import { exerciseVideoKey, exerciseVideoUrl, loadExerciseVideos } from '../lib/exercise-videos.js'
+import { exerciseVideoKey, exerciseVideoPosterUrl, exerciseVideoUrl, loadExerciseVideos } from '../lib/exercise-videos.js'
 import { useStore } from '../store/useStore.js'
 import { t } from '../lib/i18n.js'
 import Icon from './Icon.jsx'
@@ -12,26 +12,28 @@ import Icon from './Icon.jsx'
 // future workouts (issue #12).
 export default function Media({ ex, id, compact, minimizable, videoRefreshKey = 0 }) {
   const [playing, setPlaying] = useState(true)
-  const [videoUrl, setVideoUrl] = useState('')
+  const [video, setVideo] = useState(null)
   const gifSize = useStore(s => s.S.gifSize)
   const videoOwnerId = useStore(s => s.adminView?.id || s.user?.id)
   const update = useStore(s => s.update)
   useEffect(() => {
     let active = true
-    setVideoUrl('')
+    setVideo(null)
     const key = ex.custom ? exerciseVideoKey(ex.id, videoOwnerId) : ex.id
     loadExerciseVideos(Boolean(ex.custom)).then(index => {
-      if (active) setVideoUrl(exerciseVideoUrl(index[key]))
+      if (active) setVideo(index[key] || null)
     }).catch(() => {})
     return () => { active = false }
   }, [ex.id, ex.custom, videoOwnerId, videoRefreshKey])
+  const videoUrl = exerciseVideoUrl(video)
+  const posterUrl = exerciseVideoPosterUrl(video) || (ex.img ? imgSrc(ex) : '')
   if (!ex.gif && !videoUrl) return null
   const mini = minimizable && gifSize === 'mini'
   const toggleSize = e => { e.stopPropagation(); update(s => { s.gifSize = mini ? 'full' : 'mini' }) }
   return (
     <div className={'exmedia' + (compact ? ' compact' : '') + (mini ? ' mini' : '')} id={id} onClick={videoUrl ? undefined : () => setPlaying(p => !p)}>
       {videoUrl
-        ? <video controls preload="none" playsInline poster={ex.img ? imgSrc(ex) : undefined} aria-label={ex.n} src={videoUrl} />
+        ? <video controls preload="none" playsInline poster={posterUrl || undefined} aria-label={ex.n} src={videoUrl} />
         : ex.gif && <img decoding="async" src={playing ? gifSrc(ex) : imgSrc(ex)} alt={ex.n} />}
       {minimizable && (
         <button className="giftoggle" onClick={toggleSize}>
