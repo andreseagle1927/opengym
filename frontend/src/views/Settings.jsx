@@ -116,6 +116,7 @@ export default function Settings() {
     <Section title={MOBILE ? t('Your data') : DEMO ? t('Demo') : t('Account')}>
       {MOBILE ? user ? <>
         <Row icon="person" iconTint="var(--acc)" title={t('Signed in as {0}', user.name)} subtitle={t('Your profile syncs with your OpenGym server.')} />
+        {user.admin && <Row icon="wrench" iconTint="var(--indigo)" title={t('Admin dashboard')} accessory="chevron" onClick={() => nav('/admin')} />}
         <Row icon="person" iconTint="var(--blue)" title={t('Sign out')} accessory="chevron" onClick={async () => { await signOut(); nav('/home') }} />
         <Row icon="shield" iconTint="var(--red)" title={t('Sign out everywhere')} danger onClick={signOutEverywhere} />
       </> : <>
