@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { api, clearSessionToken, prepareSocialLogin, configureSupabase, restoreSupabaseSession, completePendingSupabaseLink, signOutSupabase } from '../lib/api.js'
 import { localTZ } from '../lib/format.js'
-import { registerCustom } from '../lib/exercises.js'
+import { registerCustom, registerAdminExercises } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
 import { guestAllowed } from '../lib/guest.js'
 import { MOBILE, nativeLoad, nativeSave, syncReminder, withTimeout } from '../lib/mobile.js'
@@ -18,6 +18,7 @@ export const DEF = {
   bodyweight: [], routines: [], week: {}, dayPlan: {},
   exWeights: {}, workouts: [], active: null, customEx: [], gifSize: 'full',
   foodDiary: [], foodPlan: [], customFoods: [], favoriteFoods: [],
+  profile: { heightCm: null, waistCm: null, health: { conditions: [], notes: '' }, availability: {}, consent: null, onboardingCompletedAt: null },
   nutritionTargets: { kcal: null, protein: null, carbs: null, fat: null },
   // effort: which per-set effort scale is logged — 'none' | 'rir' | 'rpe'. null, not 'none', so
   // that a profile which never chose (loaded state is overlaid on DEF, on every path: local,
@@ -311,6 +312,10 @@ export const useStore = create((set, get) => {
         } else if (hasData(S)) { await get().pushState() }
       } catch (e) { /* offline — keep local */ }
     },
+    async loadSharedExerciseCatalog() {
+      try { const { exercises = [] } = await api('/api/exercises/catalog'); registerAdminExercises(exercises) }
+      catch { registerAdminExercises([]) }
+    },
 
     restoreConflictSnapshot() {
       let snapshot
@@ -374,6 +379,7 @@ export const useStore = create((set, get) => {
               const linked = await withTimeout(completePendingSupabaseLink(), 8000)
               if (linked) get().setUser(linked)
               await withTimeout(get().pullState(), 15000)
+              await withTimeout(get().loadSharedExerciseCatalog(), 10000)
               const adminViewId = get().user?.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null
               if (adminViewId) await get().enterAdminView(adminViewId)
             } catch (e) {
@@ -415,6 +421,7 @@ export const useStore = create((set, get) => {
         const linked = await completePendingSupabaseLink()
         if (linked) get().setUser(linked)
         await get().pullState()
+        await get().loadSharedExerciseCatalog()
         const adminViewId = get().user?.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null
         if (adminViewId) await get().enterAdminView(adminViewId)
         // Re-stamp the reminder's timezone on every load — keeps it correct if you're travelling,
@@ -431,6 +438,7 @@ export const useStore = create((set, get) => {
             if (restored) {
               get().setUser(restored)
               await get().pullState()
+              await get().loadSharedExerciseCatalog()
               const adminViewId = restored.admin ? sessionStorage.getItem(ADMIN_VIEW_KEY) : null
               if (adminViewId) await get().enterAdminView(adminViewId)
             }

@@ -9,7 +9,7 @@ import LineChart from '../components/LineChart.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
 import { glyphOf } from '../lib/glyphs.js'
-import { entriesForDate, nutritionTotal } from '../lib/food.js'
+import { entriesForDate } from '../lib/food.js'
 
 // Home = what to do now + a quick glance. Deep charts & history live in Stats.
 export default function Home() {
@@ -26,7 +26,6 @@ export default function Home() {
   const prevBW = S.bodyweight.length > 1 ? S.bodyweight[S.bodyweight.length - 2] : null
   const delta = bw && prevBW ? bw.w - prevBW.w : null
   const foodToday = entriesForDate(S.foodDiary || [], todayISO())
-  const foodTotal = nutritionTotal(foodToday)
 
   const monday = new Date(today); monday.setDate(today.getDate() - ((today.getDay() + 6) % 7) + weekOffset * 7)
   const doneDays = new Set(S.workouts.map(w => w.d))
@@ -97,12 +96,6 @@ export default function Home() {
       <div className="row between" style={{ marginBottom: 10 }}>
         <div className="row" style={{ gap: 8 }}><span className="lrow-i"><Icon name="plate" /></span><h2 style={{ margin: 0 }}>Today's food</h2></div>
         <Icon name="chevronRight" className="chev" />
-      </div>
-      <div className="home-food-summary">
-        <div><strong>{Math.round(foodTotal.kcal)}</strong><small>kcal</small></div>
-        <div><strong>{foodTotal.protein}</strong><small>protein</small></div>
-        <div><strong>{foodTotal.carbs}</strong><small>carbs</small></div>
-        <div><strong>{foodTotal.fat}</strong><small>fat</small></div>
       </div>
       <div className="muted small" style={{ marginTop: 8 }}>{foodToday.length ? `${foodToday.length} ${foodToday.length === 1 ? 'item' : 'items'} logged` : 'Tap to start your food diary'}</div>
     </div>

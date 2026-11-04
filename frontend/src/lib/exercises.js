@@ -39,13 +39,23 @@ export function equipmentOf(list) {
 // Custom (user-created) exercises live in synced state S.customEx (issue #11) and are
 // merged into the id index here so every EXIDX[id] lookup keeps working unchanged.
 let customIds = []
+let adminExercises = []
+let adminIds = []
 export function registerCustom(list) {
   customIds.forEach(id => delete EXIDX[id])
+  adminIds.forEach(id => { if (!EXDB.some(e => e.id === id)) delete EXIDX[id] })
   customIds = (list || []).map(e => e.id)
   ;(list || []).forEach(e => { EXIDX[e.id] = e })
+  adminExercises.forEach(e => { EXIDX[e.id] = e })
+}
+export function registerAdminExercises(list) {
+  adminIds.forEach(id => { if (!customIds.includes(id) && !EXDB.some(e => e.id === id)) delete EXIDX[id] })
+  adminExercises = (list || []).map(e => ({ ...e, adminCatalog: true, desc: e.description || e.desc || '' }))
+  adminIds = adminExercises.map(e => e.id)
+  adminExercises.forEach(e => { EXIDX[e.id] = e })
 }
 // Full searchable catalogue — customs first so your own exercises are easy to find.
-export const allExercises = st => [...(st.customEx || []), ...EXDB]
+export const allExercises = st => [...(st.customEx || []), ...adminExercises, ...EXDB]
 
 // Media normally sits next to the app (img/ and gif/, mounted into the web container).
 // A build can point them somewhere else — the demo build pulls them off a CDN instead of

@@ -13,6 +13,7 @@ const MOBILE_BUILD = import.meta.env.VITE_MOBILE === '1'
 const NATIVE = Capacitor.isNativePlatform()
 const MOBILE_RUNTIME = MOBILE_BUILD || NATIVE
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || (MOBILE_RUNTIME ? 'https://gym.adrenocromo.com' : '')).replace(/\/$/, '')
+export const apiBaseUrl = API_BASE
 const TOKEN_KEY = 'opengym-session-token'
 let sessionToken = ''
 let supabaseClient = null

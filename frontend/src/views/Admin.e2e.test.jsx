@@ -90,9 +90,9 @@ describe('Admin selected-user profile and app flow', () => {
     expect(container.textContent).not.toContain('Create for Test Member')
     expect(container.querySelectorAll('.admin-create-action')).toHaveLength(0)
     expect(container.querySelector('[aria-label="User saved data JSON"]')).toBeNull()
-    expect([...container.querySelectorAll('.admin-saved-group h5')].map(el => el.textContent.trim())).toEqual(['Training', 'Nutrition', 'Progress'])
+    expect([...container.querySelectorAll('.admin-saved-group h5')].map(el => el.textContent.trim())).toEqual(['Training', 'Food', 'Progress'])
     expect(container.textContent).not.toContain('Preferences')
-    expect(container.querySelectorAll('.admin-saved-card')).toHaveLength(10)
+    expect(container.querySelectorAll('.admin-saved-card')).toHaveLength(8)
 
     await click(button('Open app'))
     await flush()

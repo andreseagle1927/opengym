@@ -40,6 +40,12 @@ server {
         add_header Cache-Control "public, max-age=0, must-revalidate" always;
     }
 
+    location ^~ /food-icons/ {
+        try_files $uri =404;
+        types { image/png png; }
+        add_header Cache-Control "public, max-age=2592000, immutable" always;
+    }
+
     # Apple fetches this exact path for iOS passkey association. Proxy it to the API so
     # the response can be generated from APPLE_TEAM_ID and APPLE_IOS_CLIENT_ID.
     location = /.well-known/apple-app-site-association {

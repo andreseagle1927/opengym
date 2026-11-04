@@ -6,6 +6,8 @@ import { dayAssignSheet, loadStarterPlan, planToolsSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
 import { glyphOf, DEFAULT_GLYPH } from '../lib/glyphs.js'
+import BodyMap from '../components/BodyMap.jsx'
+import { loadOfRoutine, rankOf, MUSCLE_NAME } from '../lib/muscles.js'
 
 export default function Plan() {
   const nav = useNavigate()
@@ -40,10 +42,10 @@ export default function Plan() {
         <h4 className="sec" style={{ margin: 0 }}>{t('Routines')}</h4>
         <Button size="sm" variant="tinted" icon="plus" onClick={addRoutine}>{t('New')}</Button>
       </div>
-      {S.routines.length ? <div className="list">{S.routines.map(r => <div key={r.id} className="item" onClick={() => nav('/plan/r/' + r.id)}>
+      {S.routines.length ? <div className="list">{S.routines.map(r => { const load = loadOfRoutine(r); const muscles = rankOf(load).worked; return <div key={r.id} className="item routine-list-card" onClick={() => nav('/plan/r/' + r.id)}>
         <span className="lrow-i"><Icon name={glyphOf(r.emoji)} /></span>
-        <div className="grow"><div className="tt">{r.name}</div><div className="ss">{exCount(r.ex.length)}</div></div>
-        <Icon name="chevronRight" className="chev" /></div>)}</div> : <>
+        <div className="grow"><div className="tt">{r.name}</div><div className="ss">{exCount(r.ex.length)}</div><div className="routine-muscles"><BodyMap load={load} body={S.body}/><span>{muscles.length ? muscles.slice(0, 4).map(m => MUSCLE_NAME[m]).join(' · ') : 'Muscles appear when exercises are added'}</span></div></div>
+        <Icon name="chevronRight" className="chev" /></div> })}</div> : <>
         <div className="empty"><div className="ico"><Icon name="clipboard" /></div>{t('No routines yet.')}<br />{t('Create one or load the starter plan.')}</div>
         <Button icon="sparkles" onClick={loadStarterPlan}>{t('Load starter plan (Push / Pull / Legs)')}</Button>
       </>}

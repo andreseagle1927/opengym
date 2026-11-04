@@ -140,6 +140,16 @@ export default function Settings() {
         <Row icon="lock" iconTint="var(--grey)" title={t('Passkeys not supported in this browser.')} />
       )}
     </Section>
+    {!!user && <Section title="My profile" footer="Health information is visible to Admin. This app does not provide medical advice.">
+      <div className="profile-edit-grid">
+        <label>Height (cm)<input type="number" min="1" value={S.profile?.heightCm ?? ''} placeholder="Optional" onChange={e => update(s => { s.profile ||= {}; s.profile.heightCm = Number(e.target.value) || null })}/></label>
+        <label>Waist (cm)<input type="number" min="1" value={S.profile?.waistCm ?? ''} placeholder="Optional" onChange={e => update(s => { s.profile ||= {}; s.profile.waistCm = Number(e.target.value) || null })}/></label>
+      </div>
+      <div className="profile-edit-block"><strong>Health information</strong><div className="onboard-checks">{['Heart or blood pressure condition','Diabetes','Injury or movement limitation','Pregnancy','Other','None / prefer not to say'].map(item=><label key={item}><input type="checkbox" checked={(S.profile?.health?.conditions||[]).includes(item)} onChange={e => update(s => { s.profile ||= {}; s.profile.health ||= { conditions: [], notes: '' }; const old=s.profile.health.conditions||[]; s.profile.health.conditions=e.target.checked?[...old.filter(x=>x!=='None / prefer not to say'),item]:old.filter(x=>x!==item) })}/>{item}</label>)}</div>
+        <textarea className="input" rows={2} maxLength={500} value={S.profile?.health?.notes||''} placeholder="Optional notes" onChange={e => update(s => { s.profile ||= {}; s.profile.health ||= { conditions: [], notes: '' }; s.profile.health.notes=e.target.value })}/></div>
+      <div className="profile-edit-block"><strong>Weekly availability</strong><div className="onboard-days">{['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].map((day,i)=><div key={day}><span>{day}</span><select value={S.profile?.availability?.[i]||''} onChange={e=>update(s=>{s.profile ||= {};s.profile.availability ||= {};s.profile.availability[i]=e.target.value})}><option value="">Skip</option><option value="free">Available</option><option value="busy">Busy</option></select></div>)}</div></div>
+      <Row icon="shield" iconTint="var(--green)" title="Exercise safety acknowledgment" subtitle={S.profile?.consent?.acceptedAt ? `Accepted ${S.profile.consent.acceptedAt.slice(0,10)}` : 'Not accepted'} />
+    </Section>}
     {!!user && !DEMO && <Section title={t('Sign-in methods')} footer={t('Linking a provider adds another way to access this same profile.') }>
       {(user.authMethods || []).map(method => <Row key={method} icon="check" iconTint="var(--green)" title={method === 'passkey' ? t('Passkey connected') : method === 'password' ? t('Email and password connected') : t('{0} connected', method[0].toUpperCase() + method.slice(1))} />)}
       {(user.authMethods || []).includes('password') && <Row icon="lock" iconTint="var(--acc)" title={t('Change password')} accessory="chevron" onClick={editPassword} />}

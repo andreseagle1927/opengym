@@ -25,6 +25,7 @@ import Library from './views/Library.jsx'
 import Food from './views/Food.jsx'
 import Settings from './views/Settings.jsx'
 import Admin from './views/Admin.jsx'
+import Onboarding from './views/Onboarding.jsx'
 
 bindUI(useUI)   // lets the shared controls open sheets without importing the store at module scope
 
@@ -109,7 +110,7 @@ function Shell() {
           <Icon name="personCircle" /><span>Viewing <strong>{adminView.user.name}</strong> as Admin</span>
         </div>}
         <ErrorBoundary>
-          {!authed ? <Login /> : (
+          {!authed ? <Login /> : user?.onboardingRequired && !adminView ? <Onboarding /> : (
             <Routes>
               <Route path="/home" element={<Home />} />
               <Route path="/plan" element={<Plan />} />
@@ -126,7 +127,7 @@ function Shell() {
           )}
         </ErrorBoundary>
       </div>
-      {loc.pathname !== '/admin' && <TabBar onStart={startFlow} onAdminReturn={returnToAdmin} />}
+      {loc.pathname !== '/admin' && !user?.onboardingRequired && <TabBar onStart={startFlow} onAdminReturn={returnToAdmin} />}
       {!adminView && <RestTimer />}
       <Modals />
       <Toast />

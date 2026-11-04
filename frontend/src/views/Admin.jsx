@@ -11,8 +11,11 @@ import { Button } from '../components/ui.jsx'
 import { allExercises, BODYPARTS } from '../lib/exercises.js'
 import { uid, todayISO, DAYN } from '../lib/format.js'
 import { DEFAULT_GLYPH } from '../lib/glyphs.js'
-import { makeFoodEntry, MEALS } from '../lib/food.js'
+import { MEALS } from '../lib/food.js'
 import { defaultConfig } from '../lib/history.js'
+import BodyMap from '../components/BodyMap.jsx'
+import { MUSCLES, MUSCLE_NAME } from '../lib/muscles.js'
+import { registerAdminExercises } from '../lib/exercises.js'
 
 // Admin-only operator dashboard (owner passkey + admin flag; guarded again server-side).
 // Deliberately English-only — it isn't part of the translated end-user surface, so it stays
@@ -44,7 +47,9 @@ function CreateForUser({ user, state, savePatch }) {
   const [exerciseName, setExerciseName] = useState('')
   const [bodyPart, setBodyPart] = useState('')
   const [description, setDescription] = useState('')
-  const [food, setFood] = useState({ name: '', grams: '100', kcal: '', protein: '', carbs: '', fat: '', date: todayISO(), meal: 'lunch', mode: 'plan' })
+  const [food, setFood] = useState({ foodId: '', grams: '1', date: todayISO(), meal: 'lunch', mode: 'plan' })
+  const [sharedFoods, setSharedFoods] = useState([])
+  useEffect(() => { api('/api/foods/catalog').then(d => setSharedFoods(d.foods || [])).catch(() => {}) }, [])
   const exerciseOptions = useMemo(() => allExercises({ customEx: state.customEx || [] })
     .filter(ex => ex.n.toLowerCase().includes(exerciseQuery.trim().toLowerCase()))
     .slice(0, 12), [state.customEx, exerciseQuery])
@@ -72,13 +77,9 @@ function CreateForUser({ user, state, savePatch }) {
     submit(s => { s.customEx ||= []; s.customEx.push(item) })
   }
   const addFood = () => {
-    const name = food.name.trim()
-    if (!name || !food.date || !food.meal) return setError('Enter a food name, date, and meal.')
-    const snapshot = {
-      id: 'admin-' + uid(), name: name.slice(0, 160), category: 'Admin added',
-      n: { kcal: Math.max(0, Number(food.kcal) || 0), protein: Math.max(0, Number(food.protein) || 0), carbs: Math.max(0, Number(food.carbs) || 0), fat: Math.max(0, Number(food.fat) || 0) }, portions: []
-    }
-    const entry = makeFoodEntry({ id: uid(), food: snapshot, grams: Math.max(1, Number(food.grams) || 100), date: food.date, meal: food.meal })
+    const catalogFood = sharedFoods.find(item => item.id === food.foodId)
+    if (!catalogFood || !food.date || !food.meal) return setError('Choose a shared food, date, and meal.')
+    const entry = { id: uid(), food: { id: catalogFood.id, name: catalogFood.name, imageUrl: catalogFood.imageUrl || null }, amount: Number(food.grams) || null, grams: Number(food.grams) || null, date: food.date, meal: food.meal }
     submit(s => { const key = food.mode === 'diary' ? 'foodDiary' : 'foodPlan'; s[key] ||= []; s[key].push(entry) })
   }
 
@@ -117,10 +118,9 @@ function CreateForUser({ user, state, savePatch }) {
         <Button variant="primary" disabled={saving} onClick={createExercise} icon="plus">{saving ? 'Saving…' : 'Add exercise'}</Button>
       </>}
       {action === 'food' && <>
-        <label className="admin-field"><span>Food name</span><input className="input" maxLength={160} value={food.name} onChange={e => setFood({ ...food, name: e.target.value })} placeholder="e.g. Grilled chicken" /></label>
-        <div className="admin-food-grid">{[['kcal','Calories / 100g'],['protein','Protein / 100g'],['carbs','Carbs / 100g'],['fat','Fat / 100g']].map(([key,label]) => <label className="admin-field" key={key}><span>{label}</span><input className="input" type="number" min="0" step="any" value={food[key]} onChange={e => setFood({ ...food, [key]: e.target.value })} /></label>)}</div>
+        <label className="admin-field"><span>Shared food</span><select className="input" value={food.foodId} onChange={e => setFood({ ...food, foodId: e.target.value })}><option value="">Choose a food</option>{sharedFoods.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
         <div className="admin-food-grid">
-          <label className="admin-field"><span>Amount (g)</span><input className="input" type="number" min="1" value={food.grams} onChange={e => setFood({ ...food, grams: e.target.value })} /></label>
+          <label className="admin-field"><span>Amount <small>(optional)</small></span><input className="input" type="number" min="0" value={food.grams} onChange={e => setFood({ ...food, grams: e.target.value })} /></label>
           <label className="admin-field"><span>Date</span><input className="input" type="date" value={food.date} onChange={e => setFood({ ...food, date: e.target.value })} /></label>
           <label className="admin-field"><span>Meal</span><select className="input" value={food.meal} onChange={e => setFood({ ...food, meal: e.target.value })}>{MEALS.map(meal => <option key={meal.id} value={meal.id}>{meal.label}</option>)}</select></label>
           <label className="admin-field"><span>Save to</span><select className="input" value={food.mode} onChange={e => setFood({ ...food, mode: e.target.value })}><option value="plan">Meal plan</option><option value="diary">Food diary</option></select></label>
@@ -152,69 +152,64 @@ function ProfileGroup({ title, icon, count, empty, children }) {
   </section>
 }
 
+function SharedCatalogs() {
+  const [tab, setTab] = useState('exercises'), [exercises, setExercises] = useState([]), [foods, setFoods] = useState([])
+  const [name, setName] = useState(''), [bodyPart, setBodyPart] = useState('chest'), [equipment, setEquipment] = useState(''), [description, setDescription] = useState(''), [muscles, setMuscles] = useState([]), [image, setImage] = useState(''), [editId, setEditId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const reload = async () => { const [a, b] = await Promise.all([api('/api/exercises/catalog'), api('/api/foods/catalog')]); setExercises(a.exercises || []); registerAdminExercises(a.exercises || []); setFoods(b.foods || []) }
+  useEffect(() => { reload().catch(e => setError(e.message)) }, [])
+  const reset = () => { setName(''); setDescription(''); setEquipment(''); setImage(''); setMuscles([]); setEditId(''); setError('') }
+  const save = async () => {
+    if (!name.trim()) return setError('Enter a name.')
+    setBusy(true); setError('')
+    try {
+      if (tab === 'exercises') await api('/api/admin/catalog/exercises', { method: 'POST', body: JSON.stringify({ id: editId || undefined, name, bp: bodyPart, eq: equipment, description, muscleGroups: muscles, tg: muscles[0] || '', sm: muscles.slice(1) }) })
+      else {
+        let imageBase64 = ''
+        if (image instanceof File) imageBase64 = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1] || ''); reader.onerror = reject; reader.readAsDataURL(image) })
+        await api('/api/admin/catalog/foods', { method: 'POST', body: JSON.stringify({ id: editId || undefined, name, imageBase64: imageBase64 || undefined, imageUrl: typeof image === 'string' ? image : undefined }) })
+      }
+      await reload(); reset()
+    } catch (e) { setError(e.message || 'Could not save catalog item.') } finally { setBusy(false) }
+  }
+  const remove = async (type, id) => { setBusy(true); try { await api(`/api/admin/catalog/${type}?id=${encodeURIComponent(id)}`, { method: 'DELETE' }); await reload() } catch (e) { setError(e.message) } finally { setBusy(false) } }
+  return <section className="card shared-catalog"><div><h2>Shared libraries</h2><p className="small muted">Admin-managed exercises and foods are available to every user.</p></div>
+    <div className="food-mode"><button className={tab === 'exercises' ? 'on' : ''} onClick={() => { setTab('exercises'); reset() }}>Exercises</button><button className={tab === 'foods' ? 'on' : ''} onClick={() => { setTab('foods'); reset() }}>Foods</button></div>
+    <label className="admin-field"><span>{tab === 'exercises' ? 'Exercise name' : 'Food name'}</span><input className="input" value={name} maxLength={100} onChange={e => setName(e.target.value)} placeholder={tab === 'exercises' ? 'e.g. Band pull-apart' : 'e.g. Oatmeal'} /></label>
+    {tab === 'exercises' ? <>
+      <div className="admin-field"><span>Body part</span><div className="chips">{BODYPARTS.map(part => <button type="button" key={part} className={'chip' + (bodyPart === part ? ' on' : '')} onClick={() => setBodyPart(part)}>{part}</button>)}</div></div>
+      <label className="admin-field"><span>Equipment</span><input className="input" value={equipment} onChange={e => setEquipment(e.target.value)} placeholder="Body weight, dumbbell…" /></label>
+      <label className="admin-field"><span>Description</span><textarea className="input" rows={2} value={description} onChange={e => setDescription(e.target.value)} /></label>
+      <div className="admin-field"><span>Tap muscles this exercise trains</span><BodyMap load={{}} selected={muscles} onMuscle={m => setMuscles(x => x.includes(m) ? x.filter(v => v !== m) : [...x, m])}/><div className="small muted">{muscles.length ? muscles.map(m => MUSCLE_NAME[m]).join(' · ') : 'Choose one or more muscles.'}</div></div>
+    </> : <label className="admin-field"><span>Food icon · PNG up to 5 MB</span><input className="input" type="file" accept="image/png,.png" onChange={e => { const file = e.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024 && (file.type === 'image/png' || file.name.toLowerCase().endsWith('.png'))) setImage(file); else { setImage(''); setError('Choose a PNG image no larger than 5 MB.') } }} /></label>}
+    <Button variant="primary" icon={editId ? 'check' : 'plus'} disabled={busy} onClick={save}>{busy ? 'Saving…' : `${editId ? 'Save' : 'Add'} ${tab === 'exercises' ? 'exercise' : 'food'}`}</Button>{editId && <button className="btn plain" onClick={reset}>Cancel edit</button>}{error && <p role="alert" className="small" style={{ color: 'var(--red)' }}>{error}</p>}
+    <div className="shared-catalog-list">{(tab === 'exercises' ? exercises : foods).map(item => <div className="row between" key={item.id}><span>{item.name || item.n}{item.archived ? ' · archived' : ''}</span><div className="row"><button className="btn plain" disabled={busy} onClick={() => { setEditId(item.id); setName(item.name || item.n || ''); setBodyPart(item.bp || 'chest'); setEquipment(item.eq || ''); setDescription(item.description || ''); setMuscles(item.muscleGroups || [item.tg,...(item.sm||[])].filter(Boolean)); setImage(item.imageUrl || ''); setError('') }}>Edit</button><button className="btn plain" disabled={busy} onClick={() => remove(tab, item.id)}>{tab === 'foods' ? 'Archive' : 'Remove'}</button></div></div>)}</div>
+  </section>
+}
+
 function ProfileOverview({ state, unit }) {
   const routines = Array.isArray(state.routines) ? state.routines : []
   const customs = Array.isArray(state.customEx) ? state.customEx : []
-  const diary = Array.isArray(state.foodDiary) ? [...state.foodDiary].sort((a, b) => (b.date || '').localeCompare(a.date || '')) : []
-  const meals = Array.isArray(state.foodPlan) ? [...state.foodPlan].sort((a, b) => (b.date || '').localeCompare(a.date || '')) : []
-  const customFoods = Array.isArray(state.customFoods) ? state.customFoods : []
+  const diary = Array.isArray(state.foodDiary) ? [...state.foodDiary].sort((a,b)=>(b.date||'').localeCompare(a.date||'')) : []
+  const meals = Array.isArray(state.foodPlan) ? [...state.foodPlan].sort((a,b)=>(b.date||'').localeCompare(a.date||'')) : []
   const favorites = Array.isArray(state.favoriteFoods) ? state.favoriteFoods : []
-  const weights = Array.isArray(state.bodyweight) ? [...state.bodyweight].sort((a, b) => (b.d || '').localeCompare(a.d || '')) : []
-  const exerciseIndex = new Map(allExercises({ customEx: customs }).map(ex => [ex.id, ex]))
-  const daysFor = id => [1, 2, 3, 4, 5, 6, 0].filter(day => state.week?.[day] === id).map(day => DAYN[day].slice(0, 3))
-  const foodRows = (entries, prefix) => entries.map((entry, i) => {
-    const meal = MEALS.find(item => item.id === entry.meal)?.label || entry.meal || 'Meal'
-    const date = entry.date ? fmtDate(entry.date, true) : 'Date unavailable'
-    const n = entry.n || {}
-    return <div className="admin-data-item" key={entry.id || `${prefix}-${i}`}>
-      <div className="row between"><strong>{entry.food?.name || 'Unnamed food'}</strong><span className="tag">{meal}</span></div>
-      <div className="small muted">{date} · {fmtNum(Number(entry.grams) || 0)} g · {fmtNum(Number(n.kcal) || 0)} kcal</div>
-      <div className="small muted">Protein {fmtNum(Number(n.protein) || 0)} g · Carbs {fmtNum(Number(n.carbs) || 0)} g · Fat {fmtNum(Number(n.fat) || 0)} g</div>
-    </div>
-  })
-  const targets = state.nutritionTargets || {}
-  const targetRows = [['Calories','kcal','kcal'],['Protein','protein','g'],['Carbohydrates','carbs','g'],['Fat','fat','g']].filter(([,key]) => Number(targets[key]) > 0)
-  return <div className="admin-profile-overview">
-    <h4 className="sec">Profile details</h4>
-    <ProfileGroup title="Training" icon="figureStrength" count={routines.length + customs.length + weights.length} empty="No training data saved yet.">
-      <ProfileSection title="Plans and weekly schedule" icon="calendar" count={routines.length}>
-        {routines.map((routine, i) => {
-          const assignedDays = daysFor(routine.id)
-          const exercises = Array.isArray(routine.ex) ? routine.ex : []
-          return <div className="admin-data-item" key={routine.id || `routine-${i}`}>
-            <div className="row between"><strong>{routine.name || 'Untitled plan'}</strong><span className="tag">{assignedDays.length ? assignedDays.join(' · ') : 'Unscheduled'}</span></div>
-            {exercises.length ? <div className="admin-data-sublist">{exercises.map((cfg, j) => {
-              const exercise = exerciseIndex.get(cfg.id)
-              return <div className="admin-data-subitem" key={`${cfg.id}-${j}`}><span>{exercise?.n || 'Unknown exercise'}</span><small>{exLine(cfg, unit || 'kg')}</small></div>
-            })}</div> : <div className="small muted" style={{ marginTop: 6 }}>No exercises in this plan yet.</div>}
-          </div>
-        })}
-      </ProfileSection>
-      <ProfileSection title="Custom exercises" icon="dumbbell" count={customs.length}>
-        {customs.map((exercise, i) => <div className="admin-data-item" key={exercise.id || `exercise-${i}`}>
-          <strong>{exercise.n || 'Unnamed exercise'}</strong><div className="small muted">{exercise.bp || 'Body part not set'}{exercise.eq ? ` · ${exercise.eq}` : ''}</div>
-          {exercise.desc && <div className="small admin-data-description">{exercise.desc}</div>}
-        </div>)}
-      </ProfileSection>
-      <ProfileSection title="Weight history" icon="scale" count={weights.length}>
-        {weights.map((item, i) => <div className="admin-data-item row between" key={`${item.d || 'weight'}-${i}`}><span>{item.d ? fmtDate(item.d, true) : 'Date unavailable'}</span><strong>{fmtNum(Number(item.w) || 0)} {unit || 'kg'}</strong></div>)}
-      </ProfileSection>
+  const weights = Array.isArray(state.bodyweight) ? [...state.bodyweight].sort((a,b)=>(b.d||'').localeCompare(a.d||'')) : []
+  const index = new Map(allExercises({ customEx: customs }).map(ex => [ex.id, ex]))
+  const daysFor = id => [1,2,3,4,5,6,0].filter(day => state.week?.[day] === id).map(day => DAYN[day].slice(0,3))
+  const foodRows = (entries, prefix) => entries.map((entry,i) => <div className="admin-data-item" key={entry.id || `${prefix}-${i}`}><div className="row between"><strong>{entry.food?.name || 'Unnamed food'}</strong><span className="tag">{MEALS.find(m=>m.id===entry.meal)?.label || entry.meal || 'Meal'}</span></div><div className="small muted">{entry.date ? fmtDate(entry.date,true) : 'Date unavailable'}{entry.amount || entry.grams ? ` · ${fmtNum(Number(entry.amount||entry.grams))}` : ''}</div></div>)
+  const profile=state.profile||{}, health=profile.health||{}
+  return <div className="admin-profile-overview"><h4 className="sec">Profile details</h4>
+    <ProfileGroup title="Training" icon="figureStrength" count={routines.length+customs.length+weights.length} empty="No training data saved yet.">
+      <ProfileSection title="Plans and weekly schedule" icon="calendar" count={routines.length}>{routines.map((routine,i)=><div className="admin-data-item" key={routine.id||i}><div className="row between"><strong>{routine.name||'Untitled plan'}</strong><span className="tag">{daysFor(routine.id).join(' · ')||'Unscheduled'}</span></div>{(routine.ex||[]).map((cfg,j)=><div className="admin-data-subitem" key={`${cfg.id}-${j}`}><span>{index.get(cfg.id)?.n||'Unknown exercise'}</span><small>{exLine(cfg,unit||'kg')}</small></div>)}</div>)}</ProfileSection>
+      <ProfileSection title="Custom exercises" icon="dumbbell" count={customs.length}>{customs.map((ex,i)=><div className="admin-data-item" key={ex.id||i}><strong>{ex.n}</strong><div className="small muted">{ex.bp}{ex.eq?` · ${ex.eq}`:''}</div></div>)}</ProfileSection>
+      <ProfileSection title="Weight history" icon="scale" count={weights.length}>{weights.map((item,i)=><div className="admin-data-item row between" key={`${item.d}-${i}`}><span>{fmtDate(item.d,true)}</span><strong>{fmtNum(Number(item.w)||0)} {unit||'kg'}</strong></div>)}</ProfileSection>
     </ProfileGroup>
-    <ProfileGroup title="Nutrition" icon="plate" count={diary.length + meals.length + customFoods.length + favorites.length + targetRows.length} empty="No nutrition data saved yet.">
-      <ProfileSection title="Food diary" icon="plate" count={diary.length}>{foodRows(diary, 'diary')}</ProfileSection>
-      <ProfileSection title="Meal plan" icon="clipboard" count={meals.length}>{foodRows(meals, 'plan')}</ProfileSection>
-      <ProfileSection title="Saved custom foods" icon="plate" count={customFoods.length}>
-        {customFoods.map((food, i) => <div className="admin-data-item" key={food.id || `custom-food-${i}`}>
-          <div className="row between"><strong>{food.name || 'Unnamed food'}</strong><span className="small muted">{fmtNum(Number(food.n?.kcal) || 0)} kcal / 100 g</span></div>
-          <div className="small muted">Protein {fmtNum(Number(food.n?.protein) || 0)} g · Carbs {fmtNum(Number(food.n?.carbs) || 0)} g · Fat {fmtNum(Number(food.n?.fat) || 0)} g per 100 g</div>
-        </div>)}
-      </ProfileSection>
-      <ProfileSection title="Favorite foods" icon="starFill" count={favorites.length}>
-        {favorites.map((food, i) => <div className="admin-data-item" key={food.id || `favorite-${i}`}><strong>{food.name || 'Unnamed food'}</strong><div className="small muted">{fmtNum(Number(food.n?.kcal) || 0)} kcal / 100 g</div></div>)}
-      </ProfileSection>
-      <ProfileSection title="Nutrition targets" icon="target" count={targetRows.length}>
-        <div className="admin-target-grid">{targetRows.map(([label,key,unitLabel]) => <div className="admin-target" key={key}><span>{label}</span><strong>{fmtNum(Number(targets[key]))} {unitLabel}</strong></div>)}</div>
-      </ProfileSection>
+    <ProfileGroup title="Food" icon="plate" count={diary.length+meals.length+favorites.length} empty="No food data saved yet.">
+      <ProfileSection title="Food diary" icon="plate" count={diary.length}>{foodRows(diary,'diary')}</ProfileSection><ProfileSection title="Meal plan" icon="clipboard" count={meals.length}>{foodRows(meals,'plan')}</ProfileSection>
+      <ProfileSection title="Favorite foods" icon="starFill" count={favorites.length}>{favorites.map((food,i)=><div className="admin-data-item" key={food.id||i}>{food.name}</div>)}</ProfileSection>
+    </ProfileGroup>
+    <ProfileGroup title="Health and profile" icon="personCircle" count={1} empty="No profile details saved.">
+      <ProfileSection title="Health answers" icon="heart" count={health.conditions?.length||(health.notes?1:0)}><div className="admin-data-item"><strong>{health.conditions?.length?health.conditions.join(' · '):'No conditions selected'}</strong>{health.notes&&<p className="small muted">{health.notes}</p>}</div></ProfileSection>
+      <ProfileSection title="Measurements and availability" icon="calendar" count={1}><div className="admin-data-item">Height: {profile.heightCm?`${profile.heightCm} cm`:'—'} · Waist: {profile.waistCm?`${profile.waistCm} cm`:'—'}</div><div className="admin-data-item">Available: {Object.entries(profile.availability||{}).filter(([,v])=>v==='free').map(([d])=>DAYN[Number(d)]).join(', ')||'Not provided'}</div><div className="admin-data-item">Safety acknowledgment: {profile.consent?.acceptedAt?`accepted ${fmtDate(profile.consent.acceptedAt.slice(0,10),true)}`:'not completed'}</div></ProfileSection>
     </ProfileGroup>
   </div>
 }
@@ -237,12 +232,10 @@ function UserDetail({ id, onChanged, close, openApp }) {
       { label: 'Workout history', icon: 'clock', value: state.workouts?.length || 0 },
       { label: 'Scheduled days', icon: 'calendar', value: Object.values(state.week || {}).filter(Boolean).length }
     ] },
-    { key: 'nutrition', title: 'Nutrition', icon: 'plate', items: [
+    { key: 'food', title: 'Food', icon: 'plate', items: [
       { label: 'Food diary entries', icon: 'plate', value: state.foodDiary?.length || 0 },
       { label: 'Planned meals', icon: 'clipboard', value: state.foodPlan?.length || 0 },
-      { label: 'Custom foods', icon: 'plate', value: state.customFoods?.length || 0 },
       { label: 'Favorite foods', icon: 'starFill', value: state.favoriteFoods?.length || 0 },
-      { label: 'Nutrition targets', icon: 'target', status: Object.values(state.nutritionTargets || {}).some(value => Number(value) > 0) ? 'Set' : 'Not set' }
     ] },
     { key: 'progress', title: 'Progress', icon: 'scale', items: [
       { label: 'Weigh-ins', icon: 'scale', value: state.bodyweight?.length || 0 }
@@ -424,6 +417,8 @@ export default function Admin() {
         <div className="admin-stat-reading"><strong>{card.value}</strong><small>{users ? card.note : 'Loading accounts…'}</small></div>
       </article>)}
     </div>
+
+    <SharedCatalogs />
 
     <section className="admin-users-section">
       <div className="admin-users-heading"><div><h2>Users</h2><p className="small muted">Select a user to view their profile or create content for them.</p></div><span className="tag">{filteredUsers.length} shown</span></div>

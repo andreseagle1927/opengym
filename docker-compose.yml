@@ -34,9 +34,11 @@ services:
       - PORT=${PORT:-3000}
       - DATA_DIR=/data
       - EXERCISE_VIDEO_DIR=/videos
+      - FOOD_IMAGE_DIR=/food-icons
     volumes:
       - ./data:/data         # users, passkeys, per-user state, session secret — BACK THIS UP
       - ./media/exercise-videos:/videos
+      - ./media/food-icons:/food-icons
 
   # Builds the React frontend (multi-stage) and serves it, proxying /api → api
   # and the exercise media from the shared volume. Single origin for passkeys.
@@ -64,3 +66,4 @@ services:
       - ./media/img:/usr/share/nginx/html/img:ro
       - ./media/gif:/usr/share/nginx/html/gif:ro
       - ./media/exercise-videos:/usr/share/nginx/html/exercise-videos:ro
+      - ./media/food-icons:/usr/share/nginx/html/food-icons:ro

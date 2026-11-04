@@ -19,6 +19,8 @@ import webpush from 'web-push';
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
 const VIDEO_DIR = process.env.EXERCISE_VIDEO_DIR || '/videos';
+const FOOD_IMAGE_DIR = process.env.FOOD_IMAGE_DIR || path.join(DATA, 'food-icons');
+const CONSENT_VERSION = 'exercise-safety-v1';
 const MAX_EXERCISE_VIDEO = 90 * 1024 * 1024;
 const execFileAsync = promisify(execFile);
 const RP_ID = process.env.RP_ID || 'localhost';
@@ -53,12 +55,13 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 const APP_ORIGINS = new Set([ORIGIN, 'capacitor://localhost', 'http://localhost', 'https://localhost', ...(process.env.APP_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)]);
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 const appleKeys = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
-const MAX_BODY = 5 * 1024 * 1024;
+const MAX_BODY = 8 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
 
 fs.mkdirSync(DATA, { recursive: true });
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
+fs.mkdirSync(FOOD_IMAGE_DIR, { recursive: true });
 
 let foodCatalog = { source: 'USDA FoodData Central SR Legacy', version: '2018-04', foods: [] };
 try { foodCatalog = JSON.parse(fs.readFileSync(new URL('./foods.json', import.meta.url), 'utf8')); }
@@ -112,6 +115,20 @@ function atomicWrite(file, content) {
   fs.renameSync(tmp, file);
 }
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+const exerciseCatalogFile = path.join(DATA, 'exercise-catalog.json');
+const foodCatalogFile = path.join(DATA, 'food-catalog.json');
+const readJsonFile = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
+const readExerciseCatalog = () => readJsonFile(exerciseCatalogFile, []);
+const DEFAULT_FOODS = [
+  { id: 'food-banana', name: 'Banana', imageUrl: null, archived: false },
+  { id: 'food-oats', name: 'Oats', imageUrl: null, archived: false },
+  { id: 'food-rice', name: 'Rice', imageUrl: null, archived: false },
+  { id: 'food-eggs', name: 'Eggs', imageUrl: null, archived: false },
+  { id: 'food-chicken', name: 'Chicken', imageUrl: null, archived: false },
+  { id: 'food-yogurt', name: 'Yogurt', imageUrl: null, archived: false }
+];
+const readFoodCatalog = () => readJsonFile(foodCatalogFile, DEFAULT_FOODS);
+const saveCatalog = (file, items) => atomicWrite(file, JSON.stringify(items, null, 2));
 function readState(uid) {
   try { return JSON.parse(fs.readFileSync(stateFile(uid), 'utf8')); } catch { return null; }
 }
@@ -429,7 +446,7 @@ function publicUser(user) {
   for (const identity of db.supabaseIdentities.filter(i => i.userId === user.id)) {
     for (const provider of identity.providers || []) methods.add(provider === 'email' ? 'password' : provider);
   }
-  return { id: user.id, name: user.name, admin: isAdmin(user), authMethods: [...methods], managedAuth: db.supabaseIdentities.some(i => i.userId === user.id) };
+  return { id: user.id, name: user.name, admin: isAdmin(user), onboardingRequired: !!user.onboardingRequired, authMethods: [...methods], managedAuth: db.supabaseIdentities.some(i => i.userId === user.id) };
 }
 function authReply(req, res, user, body = {}) {
   if (body.client === 'native') {
@@ -438,7 +455,7 @@ function authReply(req, res, user, body = {}) {
   return json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(user) });
 }
 function newUser(name) {
-  const user = { id: crypto.randomBytes(12).toString('base64url'), name: String(name || '').trim().slice(0, 40) || 'Athlete', created: new Date().toISOString() };
+  const user = { id: crypto.randomBytes(12).toString('base64url'), name: String(name || '').trim().slice(0, 40) || 'Athlete', created: new Date().toISOString(), onboardingRequired: true };
   db.users.push(user);
   return user;
 }
@@ -666,6 +683,53 @@ setInterval(() => { for (const [k, v] of presence) if (Date.now() - v.updatedAt 
 /* ---------- routes ---------- */
 const routes = {
   'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
+  'GET /api/exercises/catalog': async (req, res) => {
+    if (!readSession(req)) return json(res, 401, { error: 'not signed in' });
+    json(res, 200, { exercises: readExerciseCatalog() });
+  },
+  'GET /api/foods/catalog': async (req, res) => {
+    if (!readSession(req)) return json(res, 401, { error: 'not signed in' });
+    json(res, 200, { foods: readFoodCatalog().filter(food => !food.archived) });
+  },
+  'POST /api/admin/catalog/exercises': async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const body = await readBody(req), items = readExerciseCatalog();
+    const name = String(body.name || '').trim().slice(0, 100), id = String(body.id || `admin-${crypto.randomBytes(8).toString('hex')}`);
+    if (!name || !validExerciseId(id)) return json(res, 400, { error: 'valid exercise name and id required' });
+    const groups = Array.isArray(body.muscleGroups) ? body.muscleGroups.map(x => String(x).slice(0, 60)).slice(0, 18) : [];
+    const item = { id, n: name, bp: String(body.bp || 'chest').slice(0, 40), eq: String(body.eq || '').slice(0, 60), tg: String(body.tg || '').slice(0, 60), sm: Array.isArray(body.sm) ? body.sm.map(x => String(x).slice(0, 60)).slice(0, 12) : [], ...(groups.length ? { muscleGroups: groups } : {}), description: String(body.description || '').slice(0, 1000), adminCatalog: true };
+    const index = items.findIndex(x => x.id === id); if (index < 0) items.push(item); else items[index] = item;
+    saveCatalog(exerciseCatalogFile, items); json(res, 200, { exercise: item, exercises: items });
+  },
+  'DELETE /api/admin/catalog/exercises': async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = new URL(req.url, 'http://x').searchParams.get('id');
+    const items = readExerciseCatalog().filter(x => x.id !== id); saveCatalog(exerciseCatalogFile, items); json(res, 200, { exercises: items });
+  },
+  'POST /api/admin/catalog/foods': async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const body = await readBody(req), items = readFoodCatalog();
+    const name = String(body.name || '').trim().slice(0, 100), id = String(body.id || `food-${crypto.randomBytes(8).toString('hex')}`);
+    if (!name || !validExerciseId(id)) return json(res, 400, { error: 'valid food name and id required' });
+    const item = { id, name, imageUrl: body.imageUrl || null, archived: !!body.archived };
+    if (body.imageBase64) {
+      const encoded = String(body.imageBase64).replace(/^data:image\/png;base64,/, '');
+      if (encoded.length > 7_000_000) return json(res, 413, { error: 'PNG must be 5 MB or smaller' });
+      const image = Buffer.from(encoded, 'base64');
+      if (image.length > 5 * 1024 * 1024 || image.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') return json(res, 400, { error: 'upload a valid PNG image up to 5 MB' });
+      const filename = `${id}-${crypto.randomBytes(5).toString('hex')}.png`;
+      fs.writeFileSync(path.join(FOOD_IMAGE_DIR, filename), image, { flag: 'wx' });
+      item.imageUrl = `/food-icons/${filename}`;
+    }
+    const index = items.findIndex(x => x.id === id); if (index < 0) items.push(item); else items[index] = item;
+    saveCatalog(foodCatalogFile, items); json(res, 200, { food: item, foods: items.filter(x => !x.archived) });
+  },
+  'DELETE /api/admin/catalog/foods': async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = new URL(req.url, 'http://x').searchParams.get('id'), items = readFoodCatalog();
+    const food = items.find(item => item.id === id); if (food) food.archived = true;
+    saveCatalog(foodCatalogFile, items); json(res, 200, { foods: items.filter(x => !x.archived) });
+  },
   'GET /api/foods/search': async (req, res) => {
     const query = new URL(req.url, 'http://x').searchParams.get('q');
     const foods = searchFoods(query);
@@ -697,6 +761,7 @@ const routes = {
       invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST,
       rp_id: RP_ID,
       password_enabled: true,
+      exercise_consent_version: CONSENT_VERSION,
       supabase_enabled: !!(SUPABASE_URL && SUPABASE_ANON_KEY),
       supabase_url: SUPABASE_URL || null,
       supabase_anon_key: SUPABASE_ANON_KEY || null,
@@ -949,7 +1014,7 @@ const routes = {
       invite = db.invites.find(i => i.code === c.code && !i.usedBy && !i.revoked);
       if (!invite) return json(res, 403, { error: 'invite code is no longer valid — ask for a new one' });
     }
-    const user = { id: c.uid, name: c.name, created: new Date().toISOString() };
+  const user = { id: c.uid, name: c.name, created: new Date().toISOString(), onboardingRequired: true };
     if (invite) { user.invitedBy = invite.code; invite.usedBy = user.id; invite.usedAt = user.created; }
     db.users.push(user);
     db.creds.push({
@@ -1034,10 +1099,17 @@ const routes = {
     const currentRev = Number.isSafeInteger(current._rev) ? current._rev : 0;
     const clientRev = Number.isSafeInteger(body.state._rev) ? body.state._rev : 0;
     if (clientRev !== currentRev) return json(res, 409, { error: 'This profile changed on another device. The latest saved data was loaded; your previous copy is available in Settings.', conflict: true, rev: currentRev });
+    // Exercise records are curated by Admin. Preserve any legacy per-user entries, but ignore
+    // client attempts to add, edit, or delete them from an ordinary account.
+    if (!isAdmin(user)) body.state.customEx = current.customEx || [];
     delete body.state.active;              // in-progress workouts stay device-local
     body.state._rev = currentRev + 1;
     body.state._ts = Date.now();
     atomicWrite(file, JSON.stringify(body.state));
+    if (user.onboardingRequired && body.state.profile?.consent?.version === CONSENT_VERSION && body.state.profile?.onboardingCompletedAt) {
+      user.onboardingRequired = false;
+      saveDb();
+    }
     json(res, 200, { ok: true, ts: body.state._ts, rev: body.state._rev });
   },
 

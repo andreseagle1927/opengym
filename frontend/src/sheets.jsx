@@ -296,7 +296,7 @@ function ExerciseVideoControl({ ex, onChanged }) {
   const [videoStage, setVideoStage] = useState('uploading')
   const [error, setError] = useState('')
   const fileRef = useRef(null)
-  const isVideoEligibleExercise = EXDB.some(item => item.id === ex.id) || Boolean(ex.custom)
+  const isVideoEligibleExercise = EXDB.some(item => item.id === ex.id) || Boolean(ex.custom || ex.adminCatalog)
   const canManage = isAdmin || (Boolean(ex.custom) && Boolean(videoOwnerId))
   const videoKey = ex.custom ? exerciseVideoKey(ex.id, videoOwnerId) : ex.id
 
@@ -370,6 +370,7 @@ function ExerciseVideoControl({ ex, onChanged }) {
 
 function ExerciseDetail({ ex, close }) {
   const st = useStore(s => s.S)
+  const canManageCustom = useStore(s => !!s.user?.admin)
   const [videoRefreshKey, setVideoRefreshKey] = useState(0)
   const last = lastEntryFor(st, ex.id)
   const best = bestWeightFor(st, ex.id)
@@ -386,7 +387,7 @@ function ExerciseDetail({ ex, close }) {
     {ex.desc && <div className="exnote">{ex.desc}</div>}
     {best > 0 && <div className="small row" style={{ marginBottom: 6, gap: 5 }}><Icon name="trophy" style={{ fontSize: 14, color: 'var(--yellow)' }} />{t('Best:')} <b className="accent">{fmtNum(best)} {st.unit}</b>{last ? ` · ${t('last')} ${fmtDate(last.d)}: ${last.sets.map(s => setLabel(ex.id, s, last.target)).join(', ')}` : ''}</div>}
     <Button variant="primary" icon="plus" style={{ margin: '10px 0 4px' }} onClick={() => addToRoutineSheet(ex)}>{t('Add to my plan')}</Button>
-    {ex.custom && <div className="row" style={{ gap: 8, marginTop: 8 }}>
+    {ex.custom && canManageCustom && <div className="row" style={{ gap: 8, marginTop: 8 }}>
       <Button icon="pencil" style={{ flex: 1 }} onClick={() => { close(); customExSheet(ex) }}>{t('Edit')}</Button>
       <Button variant="danger" icon="trash" style={{ flex: 1 }} onClick={() => deleteCustomEx(ex, close)}>{t('Delete')}</Button>
     </div>}
@@ -589,6 +590,7 @@ function usageMap(st) {
 }
 function ExercisePicker({ onPick, close }) {
   const st = useStore(s => s.S)
+  const canCreate = useStore(s => !!s.user?.admin)
   const usage = usageMap(st)
   const [q, setQ] = useState('')
   const [bp, setBp] = useState('')          // '' = all, '★' = chosen, else a body part
@@ -619,7 +621,7 @@ function ExercisePicker({ onPick, close }) {
       {eqOpts.map(x => <button key={x} className={'chip' + (eqOn === x ? ' on' : '')} onClick={() => { setEq(x); setShown(50) }}>{t(x)}</button>)}
     </div>}
     <div className="list">
-      {bp !== '★' && <div className="item" onClick={() => customExSheet(null, ex => onPick(ex), q.trim())}>
+      {canCreate && bp !== '★' && <div className="item" onClick={() => customExSheet(null, ex => onPick(ex), q.trim())}>
         <div className="thumb thumb-x"><Icon name="sparkles" /></div>
         <div className="grow"><div className="tt">{t('Create your own exercise')}</div><div className="ss">{t('name + body part, no animation')}</div></div><Icon name="plus" className="chev" />
       </div>}
@@ -663,6 +665,7 @@ function ProgressionFields({ ex, mode, c, setC, routine, unit }) {
 
 function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
   const st = useStore(s => s.S)
+  const canManageCustom = useStore(s => !!s.user?.admin)
   const cardio = isCardio(ex.id)
   const [c, setC] = useState(existing || initial || defaultConfig(ex.id))
   // Cardio keeps its own duration+speed form; the reps/time choice (issue #16) is offered for
@@ -771,7 +774,7 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
     </div>}
     <ProgressionFields ex={ex} mode={mode} c={c} setC={setC} routine={routine} unit={st.unit} />
     <Button variant="primary" onClick={save}>{existing ? t('Save') : t('Add to routine')}</Button>
-    {ex.custom && <><div style={{ height: 8 }} /><Button icon="pencil" onClick={() => { close(); customExSheet(ex) }}>{t('Edit or delete this exercise')}</Button></>}
+    {ex.custom && canManageCustom && <><div style={{ height: 8 }} /><Button icon="pencil" onClick={() => { close(); customExSheet(ex) }}>{t('Edit or delete this exercise')}</Button></>}
     {onDelete && <><div style={{ height: 8 }} /><Button variant="danger" onClick={() => { close(); onDelete() }}>{t('Remove from routine')}</Button></>}
   </>
 }
