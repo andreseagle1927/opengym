@@ -173,6 +173,7 @@ function SharedCatalogs() {
     reader.readAsDataURL(file)
   }
   const clearImage = () => { setImage(''); setImagePreview(''); if (imageInput.current) imageInput.current.value = '' }
+  const openImagePicker = () => { if (imageInput.current) { imageInput.current.value = ''; imageInput.current.click() } }
   const save = async () => {
     if (!name.trim()) return setError('Enter a name.')
     setBusy(true); setError('')
@@ -200,13 +201,13 @@ function SharedCatalogs() {
       {imagePreview ? <div className="food-image-preview-card">
         <img src={imagePreview} alt="Food icon preview" />
         <div className="food-image-preview-copy"><strong>{image instanceof File ? image.name : 'Current food image'}</strong><small>{image instanceof File ? `${(image.size / 1024).toFixed(0)} KB · PNG` : 'Saved PNG image'}</small></div>
-        <label className="food-image-change" htmlFor="shared-food-image">Change</label>
+        <button type="button" className="food-image-change" onClick={openImagePicker}>Change</button>
         <button type="button" className="iconbtn food-image-remove" aria-label="Remove image" onClick={clearImage}><Icon name="trash" /></button>
-      </div> : <label className="food-image-dropzone" htmlFor="shared-food-image" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); chooseImage(e.dataTransfer.files?.[0]) }}>
+      </div> : <button type="button" className="food-image-dropzone" onClick={openImagePicker} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); chooseImage(e.dataTransfer.files?.[0]) }}>
         <span className="food-image-upload-icon"><Icon name="upload" /></span>
         <strong>Choose a food image</strong><small>Tap to browse or drop a PNG here</small>
         <span className="food-image-format">PNG · MAX 5 MB</span>
-      </label>}
+      </button>}
     </div>}
     <Button variant="primary" icon={editId ? 'check' : 'plus'} disabled={busy} onClick={save}>{busy ? 'Saving…' : `${editId ? 'Save' : 'Add'} ${tab === 'exercises' ? 'exercise' : 'food'}`}</Button>{editId && <button className="btn plain" onClick={reset}>Cancel edit</button>}{error && <p role="alert" className="small" style={{ color: 'var(--red)' }}>{error}</p>}
     <div className="shared-catalog-list">{(tab === 'exercises' ? exercises : foods).map(item => <div className="row between" key={item.id}><span>{item.name || item.n}{item.archived ? ' · archived' : ''}</span><div className="row"><button className="btn plain" disabled={busy} onClick={() => { setEditId(item.id); setName(item.name || item.n || ''); setBodyPart(item.bp || 'chest'); setEquipment(item.eq || ''); setDescription(item.description || ''); setMuscles(item.muscleGroups || [item.tg,...(item.sm||[])].filter(Boolean)); setImage(item.imageUrl || ''); setImagePreview(item.imageUrl || ''); setError('') }}>Edit</button><button className="btn plain" disabled={busy} onClick={() => remove(tab, item.id)}>{tab === 'foods' ? 'Archive' : 'Remove'}</button></div></div>)}</div>
