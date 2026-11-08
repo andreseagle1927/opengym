@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
@@ -155,9 +155,24 @@ function ProfileGroup({ title, icon, count, empty, children }) {
 function SharedCatalogs() {
   const [tab, setTab] = useState('exercises'), [exercises, setExercises] = useState([]), [foods, setFoods] = useState([])
   const [name, setName] = useState(''), [bodyPart, setBodyPart] = useState('chest'), [equipment, setEquipment] = useState(''), [description, setDescription] = useState(''), [muscles, setMuscles] = useState([]), [image, setImage] = useState(''), [editId, setEditId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const [imagePreview, setImagePreview] = useState('')
+  const imageInput = useRef(null)
   const reload = async () => { const [a, b] = await Promise.all([api('/api/exercises/catalog'), api('/api/foods/catalog')]); setExercises(a.exercises || []); registerAdminExercises(a.exercises || []); setFoods(b.foods || []) }
   useEffect(() => { reload().catch(e => setError(e.message)) }, [])
-  const reset = () => { setName(''); setDescription(''); setEquipment(''); setImage(''); setMuscles([]); setEditId(''); setError('') }
+  const reset = () => { setName(''); setDescription(''); setEquipment(''); setImage(''); setImagePreview(''); setMuscles([]); setEditId(''); setError(''); if (imageInput.current) imageInput.current.value = '' }
+  const chooseImage = file => {
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024 || (file.type !== 'image/png' && !file.name.toLowerCase().endsWith('.png'))) {
+      setError('Choose a PNG image no larger than 5 MB.')
+      return
+    }
+    setError(''); setImage(file)
+    const reader = new FileReader()
+    reader.onload = () => setImagePreview(String(reader.result || ''))
+    reader.onerror = () => setError('Could not preview this image. Try another PNG.')
+    reader.readAsDataURL(file)
+  }
+  const clearImage = () => { setImage(''); setImagePreview(''); if (imageInput.current) imageInput.current.value = '' }
   const save = async () => {
     if (!name.trim()) return setError('Enter a name.')
     setBusy(true); setError('')
@@ -180,9 +195,21 @@ function SharedCatalogs() {
       <label className="admin-field"><span>Equipment</span><input className="input" value={equipment} onChange={e => setEquipment(e.target.value)} placeholder="Body weight, dumbbell…" /></label>
       <label className="admin-field"><span>Description</span><textarea className="input" rows={2} value={description} onChange={e => setDescription(e.target.value)} /></label>
       <div className="admin-field"><span>Tap muscles this exercise trains</span><BodyMap load={{}} selected={muscles} onMuscle={m => setMuscles(x => x.includes(m) ? x.filter(v => v !== m) : [...x, m])}/><div className="small muted">{muscles.length ? muscles.map(m => MUSCLE_NAME[m]).join(' · ') : 'Choose one or more muscles.'}</div></div>
-    </> : <label className="admin-field"><span>Food icon · PNG up to 5 MB</span><input className="input" type="file" accept="image/png,.png" onChange={e => { const file = e.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024 && (file.type === 'image/png' || file.name.toLowerCase().endsWith('.png'))) setImage(file); else { setImage(''); setError('Choose a PNG image no larger than 5 MB.') } }} /></label>}
+    </> : <div className="admin-field food-image-field"><span>Food image <small>Optional · PNG, up to 5 MB</small></span>
+      <input ref={imageInput} id="shared-food-image" className="food-file-input" type="file" accept="image/png,.png" aria-label="Choose a PNG food image" onChange={e => chooseImage(e.target.files?.[0])} />
+      {imagePreview ? <div className="food-image-preview-card">
+        <img src={imagePreview} alt="Food icon preview" />
+        <div className="food-image-preview-copy"><strong>{image instanceof File ? image.name : 'Current food image'}</strong><small>{image instanceof File ? `${(image.size / 1024).toFixed(0)} KB · PNG` : 'Saved PNG image'}</small></div>
+        <label className="food-image-change" htmlFor="shared-food-image">Change</label>
+        <button type="button" className="iconbtn food-image-remove" aria-label="Remove image" onClick={clearImage}><Icon name="trash" /></button>
+      </div> : <label className="food-image-dropzone" htmlFor="shared-food-image" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); chooseImage(e.dataTransfer.files?.[0]) }}>
+        <span className="food-image-upload-icon"><Icon name="upload" /></span>
+        <strong>Choose a food image</strong><small>Tap to browse or drop a PNG here</small>
+        <span className="food-image-format">PNG · MAX 5 MB</span>
+      </label>}
+    </div>}
     <Button variant="primary" icon={editId ? 'check' : 'plus'} disabled={busy} onClick={save}>{busy ? 'Saving…' : `${editId ? 'Save' : 'Add'} ${tab === 'exercises' ? 'exercise' : 'food'}`}</Button>{editId && <button className="btn plain" onClick={reset}>Cancel edit</button>}{error && <p role="alert" className="small" style={{ color: 'var(--red)' }}>{error}</p>}
-    <div className="shared-catalog-list">{(tab === 'exercises' ? exercises : foods).map(item => <div className="row between" key={item.id}><span>{item.name || item.n}{item.archived ? ' · archived' : ''}</span><div className="row"><button className="btn plain" disabled={busy} onClick={() => { setEditId(item.id); setName(item.name || item.n || ''); setBodyPart(item.bp || 'chest'); setEquipment(item.eq || ''); setDescription(item.description || ''); setMuscles(item.muscleGroups || [item.tg,...(item.sm||[])].filter(Boolean)); setImage(item.imageUrl || ''); setError('') }}>Edit</button><button className="btn plain" disabled={busy} onClick={() => remove(tab, item.id)}>{tab === 'foods' ? 'Archive' : 'Remove'}</button></div></div>)}</div>
+    <div className="shared-catalog-list">{(tab === 'exercises' ? exercises : foods).map(item => <div className="row between" key={item.id}><span>{item.name || item.n}{item.archived ? ' · archived' : ''}</span><div className="row"><button className="btn plain" disabled={busy} onClick={() => { setEditId(item.id); setName(item.name || item.n || ''); setBodyPart(item.bp || 'chest'); setEquipment(item.eq || ''); setDescription(item.description || ''); setMuscles(item.muscleGroups || [item.tg,...(item.sm||[])].filter(Boolean)); setImage(item.imageUrl || ''); setImagePreview(item.imageUrl || ''); setError('') }}>Edit</button><button className="btn plain" disabled={busy} onClick={() => remove(tab, item.id)}>{tab === 'foods' ? 'Archive' : 'Remove'}</button></div></div>)}</div>
   </section>
 }
 
