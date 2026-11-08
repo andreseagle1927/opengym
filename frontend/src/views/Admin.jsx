@@ -203,9 +203,9 @@ function SharedCatalogs() {
         <div className="food-image-preview-copy"><strong>{image instanceof File ? image.name : 'Current food image'}</strong><small>{image instanceof File ? `${(image.size / 1024).toFixed(0)} KB · PNG` : 'Saved PNG image'}</small></div>
         <button type="button" className="food-image-change" onClick={openImagePicker}>Change</button>
         <button type="button" className="iconbtn food-image-remove" aria-label="Remove image" onClick={clearImage}><Icon name="trash" /></button>
-      </div> : <button type="button" className="food-image-dropzone" onClick={openImagePicker} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); chooseImage(e.dataTransfer.files?.[0]) }}>
+      </div> : <button type="button" className="food-image-dropzone" disabled={!name.trim()} onClick={openImagePicker} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); chooseImage(e.dataTransfer.files?.[0]) }}>
         <span className="food-image-upload-icon"><Icon name="upload" /></span>
-        <strong>Choose a food image</strong><small>Tap to browse or drop a PNG here</small>
+        <strong>{name.trim() ? 'Choose a food image' : 'Enter a food name first'}</strong><small>{name.trim() ? 'Tap to browse or drop a PNG here' : 'Add an image after naming this food'}</small>
         <span className="food-image-format">PNG · MAX 5 MB</span>
       </button>}
     </div>}
